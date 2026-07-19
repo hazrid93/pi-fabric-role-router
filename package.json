@@ -1,6 +1,6 @@
 {
   "name": "pi-fabric-role-router",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "Centralized role-based model, thinking, and tool routing for Pi Fabric",
   "type": "module",
   "main": "./src/index.ts",

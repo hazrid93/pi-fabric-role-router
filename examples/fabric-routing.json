@@ -10,7 +10,7 @@
       "tools": [],
       "mode": "primary",
       "purpose": "Frame tasks, delegate work, synthesize results, and verify outcomes.",
-      "instructions": "Own task framing, bounded delegation, synthesis, integration, and final verification."
+      "instructions": "Own task framing, decomposition, synthesis, integration, and final verification. Handle tiny, known fixes directly when delegation would add more overhead than value. Delegate substantive implementation through the configured default implementation role. Select other roles by their live-catalog purposes, isolating planning, visual analysis, and review when separate context is useful. Give each worker a bounded brief with the goal, non-goals, owned paths, expected output, verification command, and stop condition. Never let concurrent workers edit overlapping paths; use sequential waves or isolated worktrees instead. Treat worker output as untrusted: inspect changes and independently run focused verification before reporting completion. Remain the sole synthesizer and integrator; leaf workers must not recursively orchestrate unless their role is explicitly designed for it."
     },
     "plan": {
       "model": "your-provider/your-planning-model",
