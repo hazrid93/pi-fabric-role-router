@@ -2,8 +2,35 @@ import type {
   ExtensionAPI,
   ExtensionCommandContext,
   ExtensionContext,
+  Theme,
 } from "@earendil-works/pi-coding-agent";
-import { isToolCallEventType } from "@earendil-works/pi-coding-agent";
+import {
+  getSelectListTheme,
+  getSettingsListTheme,
+  isToolCallEventType,
+} from "@earendil-works/pi-coding-agent";
+import { ModelSelectorComponent } from "./model-selector.js";
+import {
+  buildToolCatalog,
+  ToolSelectorComponent,
+  uniqueToolNames,
+} from "./tool-selector.js";
+import {
+  Container,
+  type Component,
+  type SettingItem,
+  type TUI,
+  SettingsList,
+  Editor,
+  Input,
+  Key,
+  matchesKey,
+  Text,
+  getKeybindings,
+  truncateToWidth,
+  SelectList,
+  type SelectListTheme,
+} from "@earendil-works/pi-tui";
 import {
   chmodSync,
   closeSync,
@@ -21,8 +48,10 @@ import { join, dirname, basename } from "node:path";
 
 export const CONFIG_FILE = "fabric-routing.json";
 export const ROLE_NAME_PATTERN = /^[a-z][a-z0-9_-]*$/;
-const THINKING_LEVELS = new Set(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
-const MODES = new Set(["primary", "primary-or-advisory", "subagent"]);
+const THINKING_LEVEL_CHOICES = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
+const THINKING_LEVELS: ReadonlySet<string> = new Set(THINKING_LEVEL_CHOICES);
+const MODE_CHOICES = ["primary", "primary-or-advisory", "subagent"] as const;
+const MODES: ReadonlySet<string> = new Set(MODE_CHOICES);
 const RUNNERS = new Set(["pi", "claude"]);
 const TRANSPORTS = new Set(["auto", "process", "tmux", "screen", "localterm"]);
 const RUNNER_CHOICES = ["inherit", "pi", "claude"] as const;
@@ -49,8 +78,15 @@ export type RoleRoute = {
 };
 
 /** The same open-shape rule applies to the routing document itself. */
+export type DispatchConfig = {
+  primaryRole?: string;
+  defaultImplementationRole?: string;
+  [key: string]: unknown;
+};
+
 export type RoutingConfig = {
   roles: Record<string, RoleRoute>;
+  dispatch?: DispatchConfig;
   [key: string]: unknown;
 };
 
@@ -72,6 +108,17 @@ export const validateRoutingConfig = (value: unknown): RoutingConfig => {
   const document = value as Record<string, unknown>;
   const roleEntries = document.roles as Record<string, unknown>;
 
+  if (document.dispatch !== undefined && !isRecord(document.dispatch)) {
+    invalid("Pi Fabric role routing dispatch must be an object");
+  }
+  if (isRecord(document.dispatch)) {
+    if (document.dispatch.primaryRole !== undefined && typeof document.dispatch.primaryRole !== "string") {
+      invalid("Pi Fabric role routing dispatch.primaryRole must be a string");
+    }
+    if (document.dispatch.defaultImplementationRole !== undefined && typeof document.dispatch.defaultImplementationRole !== "string") {
+      invalid("Pi Fabric role routing dispatch.defaultImplementationRole must be a string");
+    }
+  }
   const roles: Record<string, RoleRoute> = {};
   for (const [name, rawRoute] of Object.entries(roleEntries)) {
     const route = isRecord(rawRoute) ? rawRoute : invalid(`Invalid role entry: ${name}`);
@@ -110,6 +157,60 @@ export const validateRoutingConfig = (value: unknown): RoutingConfig => {
   // Spread the original object rather than rebuilding it: unknown top-level keys
   // and unknown route fields are intentionally part of the persisted contract.
   return { ...document, roles } as RoutingConfig;
+};
+
+/** Resolve the role that owns automatic top-level model and prompt behavior. */
+export const resolvePrimaryRoleName = (config: RoutingConfig): string | undefined => {
+  const configured = config.dispatch?.primaryRole;
+  if (configured !== undefined) return config.roles[configured] ? configured : undefined;
+  return config.roles.orchestrator ? "orchestrator" : undefined;
+};
+
+export type RoleReferenceMigration = {
+  config: RoutingConfig;
+  migrated: string[];
+  materializedPrimary: boolean;
+};
+
+/** Rename a role and migrate only the router-owned dispatch references. */
+export const migrateRoleReferences = (
+  config: RoutingConfig,
+  oldName: string,
+  newName: string,
+): RoleReferenceMigration => {
+  const nextConfig = { ...config, roles: { ...config.roles } };
+  const nextDispatch = config.dispatch ? { ...config.dispatch } : {};
+  const migrated: string[] = [];
+  let materializedPrimary = false;
+  if (nextDispatch.primaryRole === oldName) {
+    nextDispatch.primaryRole = newName;
+    migrated.push("dispatch.primaryRole");
+  } else if (oldName === "orchestrator" && nextDispatch.primaryRole === undefined) {
+    nextDispatch.primaryRole = newName;
+    materializedPrimary = true;
+  }
+  if (nextDispatch.defaultImplementationRole === oldName) {
+    nextDispatch.defaultImplementationRole = newName;
+    migrated.push("dispatch.defaultImplementationRole");
+  }
+  if (Object.keys(nextDispatch).length > 0 || config.dispatch) nextConfig.dispatch = nextDispatch;
+  const route = nextConfig.roles[oldName];
+  delete nextConfig.roles[oldName];
+  nextConfig.roles[newName] = route;
+  return { config: nextConfig, migrated, materializedPrimary };
+};
+
+export const removeRoleReferences = (config: RoutingConfig, name: string): string[] => {
+  const references: string[] = [];
+  if (config.dispatch?.primaryRole === name) references.push("dispatch.primaryRole");
+  if (config.dispatch?.defaultImplementationRole === name) references.push("dispatch.defaultImplementationRole");
+  if (references.length > 0 && config.dispatch) {
+    const dispatch = { ...config.dispatch };
+    if (dispatch.primaryRole === name) delete dispatch.primaryRole;
+    if (dispatch.defaultImplementationRole === name) delete dispatch.defaultImplementationRole;
+    config.dispatch = dispatch;
+  }
+  return references;
 };
 
 export const loadRoutingConfig = (): RoutingConfig => {
@@ -171,6 +272,26 @@ const dispatchableRoutes = (config: RoutingConfig) =>
     ]),
   );
 
+/** Whitelist role metadata exposed by roles.describe; unknown route fields stay private. */
+const describableRoutes = (config: RoutingConfig) =>
+  Object.fromEntries(
+    Object.entries(config.roles).map(([name, route]) => [
+      name,
+      {
+        name,
+        model: route.model,
+        thinking: route.thinking,
+        tools: route.tools,
+        mode: route.mode,
+        ...(route.purpose !== undefined ? { purpose: route.purpose } : {}),
+        ...(route.instructions !== undefined ? { instructions: route.instructions } : {}),
+        ...(route.runner !== undefined ? { runner: route.runner } : {}),
+        ...(route.transport !== undefined ? { transport: route.transport } : {}),
+        ...(route.extensions !== undefined ? { extensions: route.extensions } : {}),
+      },
+    ]),
+  );
+
 /** The exact text boundary used by all role-routed calls. */
 export const combineRoleInstructions = (instructions: string | undefined, task: string): string => {
   const roleText = instructions?.trim();
@@ -183,8 +304,11 @@ export const combineRoleInstructions = (instructions: string | undefined, task: 
 /** Build the Fabric guest prelude. Exported to make injection behavior testable. */
 export const buildRolePrelude = (config: RoutingConfig): string => {
   const routes = JSON.stringify(dispatchableRoutes(config));
+  const descriptions = JSON.stringify(describableRoutes(config));
   return `const __fabricRoleRoutes = ${routes} as const;
+const __fabricRoleDescriptions = ${descriptions} as const;
 type FabricRole = keyof typeof __fabricRoleRoutes;
+type FabricRoleDescription = { name: string; model: string; thinking: string; tools: readonly string[]; mode: string; purpose?: string; instructions?: string; runner?: string; transport?: string; extensions?: boolean };
 type FabricRoleRequest = { role: FabricRole; task: string; name?: string; timeoutMs?: number; recursive?: boolean; worktree?: boolean; schema?: Record<string, unknown> };
 type FabricRoleCreateRequest = { role: FabricRole; name: string; instructions?: string; events?: Array<"input" | "turn_end" | "agent_settled" | "tool_error" | "session_compact">; topics?: string[]; delivery?: "mailbox" | "steer" | "followUp" | "nextTurn"; responseMode?: "text" | "directive"; triggerTurn?: boolean; coalesce?: boolean; timeoutMs?: number };
 const __combineFabricRoleInstructions = (instructions: string | undefined, task: string) => {
@@ -230,21 +354,28 @@ const roles = {
   spawn: (request: FabricRoleRequest) => agents.spawn(__resolveFabricRole(request)),
   create: (request: FabricRoleCreateRequest) => agents.create(__resolveFabricActor(request)),
   list: () => Object.keys(__fabricRoleRoutes) as FabricRole[],
+  describe: (role: FabricRole): FabricRoleDescription => {
+    const description = __fabricRoleDescriptions[role];
+    if (!description) throw new Error(\`Unknown Pi Fabric role: \${String(role)}\`);
+    return { ...description };
+  },
 };
 `;
 };
 
-const applyPrimaryRole = async (pi: ExtensionAPI, context: ExtensionContext): Promise<void> => {
-  const route = loadRoutingConfig().roles.orchestrator;
-  if (!route) return;
+export const applyPrimaryRole = async (pi: ExtensionAPI, context: ExtensionContext): Promise<void> => {
+  const config = loadRoutingConfig();
+  const primaryName = resolvePrimaryRoleName(config);
+  if (!primaryName) return;
+  const route = config.roles[primaryName];
   const separator = route.model.indexOf("/");
   const provider = route.model.slice(0, separator);
   const id = route.model.slice(separator + 1);
   const model = context.modelRegistry.find(provider, id);
-  if (!model) throw new Error(`Orchestrator role model is unavailable: ${route.model}`);
+  if (!model) throw new Error(`Primary role ${primaryName} model is unavailable: ${route.model}`);
   if (context.model?.provider !== provider || context.model?.id !== id) {
     const selected = await pi.setModel(model);
-    if (!selected) throw new Error(`Orchestrator role model has no available credentials: ${route.model}`);
+    if (!selected) throw new Error(`Primary role ${primaryName} model has no available credentials: ${route.model}`);
   }
   pi.setThinkingLevel(route.thinking);
 };
@@ -266,6 +397,20 @@ export const formatRoleDetails = (config: RoutingConfig): string =>
     return `${name}\n  model: ${route.model}\n  thinking: ${route.thinking}\n  mode: ${route.mode}\n  tools: ${toolsSummary(route.tools)}${optional ? `\n  ${optional}` : ""}${purpose}${instructions}`;
   }).join("\n\n");
 
+export const formatRoleCatalog = (config: RoutingConfig): string => {
+  const primary = resolvePrimaryRoleName(config);
+  const implementation = config.dispatch?.defaultImplementationRole;
+  const lines = Object.entries(config.roles).map(([name, route]) => {
+    const markers = [
+      name === primary ? "primary" : undefined,
+      name === implementation ? "default implementation" : undefined,
+    ].filter(Boolean);
+    const purpose = route.purpose?.trim() || `Configured ${route.mode} role.`;
+    return `- ${name} [${route.mode}]${markers.length ? ` (${markers.join(", ")})` : ""}: ${purpose}`;
+  });
+  return `Available Pi Fabric roles (live routing catalog):\n${lines.join("\n")}\nChoose roles by purpose and dispatch with roles.run({ role, task }).`;
+};
+
 export const formatRoleDetail = (name: string, route: RoleRoute): string => {
   const optional = [
     route.runner ? `runner: ${route.runner}` : undefined,
@@ -279,73 +424,251 @@ const notifyError = (context: ExtensionContext, error: unknown): void => {
   context.ui.notify(error instanceof Error ? error.message : String(error), "error");
 };
 
-const chooseModel = async (context: ExtensionCommandContext, current?: string): Promise<string | undefined> => {
-  const available = context.modelRegistry.getAvailable();
-  if (available.length === 0) {
-    context.ui.notify("No available Pi models were found.", "warning");
-    return undefined;
+const optionalChoice = <T extends string>(value: T | undefined): string => value ?? "inherit";
+const extensionChoice = (value: boolean | undefined): typeof EXTENSION_CHOICES[number] =>
+  value === undefined ? "inherit" : value ? "enabled" : "disabled";
+const toolsDisplayValue = (tools: readonly string[]): string => tools.length > 0 ? tools.join(", ") : "(none)";
+
+/** A small SelectList submenu that starts on the route's current value. */
+class RoleChoicePicker implements Component {
+  private readonly list: SelectList;
+  private readonly title: string;
+
+  constructor(
+    title: string,
+    values: readonly string[],
+    currentValue: string,
+    theme: SelectListTheme,
+    done: (value: string | undefined) => void,
+  ) {
+    this.title = title;
+    this.list = new SelectList(
+      values.map((value) => ({ value, label: value, description: value === currentValue ? "Current value" : undefined })),
+      Math.min(values.length, 10),
+      theme,
+    );
+    this.list.setSelectedIndex(Math.max(0, values.findIndex((value) => value === currentValue)));
+    this.list.onSelect = (item) => done(item.value);
+    this.list.onCancel = () => done(undefined);
   }
-  const query = await context.ui.input("Search available models", current ?? "provider/model");
-  if (query === undefined) return undefined;
-  const needle = query.trim().toLowerCase();
-  const matches = available.filter((model) => {
-    const key = `${model.provider}/${model.id}`.toLowerCase();
-    return !needle || key.includes(needle) || model.name.toLowerCase().includes(needle);
-  });
-  if (matches.length === 0) {
-    context.ui.notify(`No available models match “${query}”.`, "warning");
-    return undefined;
+
+  render(width: number): string[] {
+    return [this.title, "", ...this.list.render(width)];
   }
-  const labels = matches.map((model) => `${model.provider}/${model.id} — ${model.name}`);
-  const selected = await context.ui.select("Select model", labels);
-  if (selected === undefined) return undefined;
-  const index = labels.indexOf(selected);
-  return index >= 0 ? `${matches[index].provider}/${matches[index].id}` : undefined;
+
+  handleInput(data: string): void {
+    this.list.handleInput(data);
+  }
+
+  invalidate(): void {
+    this.list.invalidate();
+  }
+}
+
+const makeTextEditor = (
+  tui: TUI,
+  theme: Theme,
+  currentValue: string,
+  multiline: boolean,
+  done: (value: string | undefined) => void,
+): Component => {
+  if (multiline) {
+    const editor = new Editor(tui, {
+      borderColor: (text) => theme.fg("border", text),
+      selectList: getSelectListTheme(),
+    });
+    editor.setText(currentValue);
+    editor.focused = true;
+    editor.onSubmit = (value) => done(value);
+    return {
+      render: (width) => editor.render(width),
+      handleInput: (data) => {
+        if (matchesKey(data, Key.escape)) done(undefined);
+        else editor.handleInput(data);
+      },
+      invalidate: () => editor.invalidate(),
+    };
+  }
+  const input = new Input();
+  input.setValue(currentValue);
+  input.focused = true;
+  input.onSubmit = (value) => done(value);
+  input.onEscape = () => done(undefined);
+  return {
+    render: (width) => [theme.fg("accent", multiline ? "Edit instructions" : "Edit purpose"), "", ...input.render(width)],
+    handleInput: (data) => input.handleInput(data),
+    invalidate: () => input.invalidate(),
+  };
 };
 
+export type RoleSettingValues = {
+  model: string;
+  thinking: string;
+  mode: string;
+  tools: string;
+  purpose: string;
+  instructions: string;
+  runner: string;
+  transport: string;
+  extensions: string;
+};
+
+/** Values displayed immediately by the stateful settings screen. */
+export const getRoleSettingValues = (route: RoleRoute): RoleSettingValues => ({
+  model: route.model || "(choose a model)",
+  thinking: route.thinking,
+  mode: route.mode,
+  tools: toolsDisplayValue(route.tools),
+  purpose: route.purpose?.trim() || "(none)",
+  instructions: route.instructions?.trim() || "(none)",
+  runner: optionalChoice(route.runner),
+  transport: optionalChoice(route.transport),
+  extensions: extensionChoice(route.extensions),
+});
+
+const cloneRoleDraft = (existing: RoleRoute): RoleRoute => ({
+  ...existing,
+  tools: [...existing.tools],
+});
+
+/**
+ * Stateful role settings screen. All SettingsList callbacks update only a
+ * private draft; the returned route is the sole commit point.
+ */
 export const editRole = async (
   context: ExtensionCommandContext,
   name: string,
   existing: RoleRoute,
 ): Promise<RoleRoute | undefined> => {
-  const model = await chooseModel(context, existing.model);
-  if (model === undefined) return undefined;
-  const thinking = await context.ui.select("Thinking level", [...THINKING_LEVELS]) as ThinkingLevel | undefined;
-  if (thinking === undefined) return undefined;
-  const mode = await context.ui.select("Role mode", [...MODES]) as RoleMode | undefined;
-  if (mode === undefined) return undefined;
-  const toolsText = await context.ui.input("Tools (comma-separated)", existing.tools.join(", "));
-  if (toolsText === undefined) return undefined;
-  const purpose = await context.ui.input("Purpose (optional)", existing.purpose ?? "");
-  if (purpose === undefined) return undefined;
-  const instructions = await context.ui.editor("Role instructions (optional)", existing.instructions ?? "");
-  if (instructions === undefined) return undefined;
-  const runnerChoice = await context.ui.select("Runner", [...RUNNER_CHOICES]) as typeof RUNNER_CHOICES[number] | undefined;
-  if (runnerChoice === undefined) return undefined;
-  const transportChoice = await context.ui.select("Transport", [...TRANSPORT_CHOICES]) as typeof TRANSPORT_CHOICES[number] | undefined;
-  if (transportChoice === undefined) return undefined;
-  const extensionsChoice = await context.ui.select("Extensions", [...EXTENSION_CHOICES]) as typeof EXTENSION_CHOICES[number] | undefined;
-  if (extensionsChoice === undefined) return undefined;
+  const availableModels = context.modelRegistry.getAvailable().map((model) => ({
+    provider: model.provider,
+    id: model.id,
+    name: model.name,
+    input: model.input,
+    reasoning: model.reasoning,
+  }));
+  if (availableModels.length === 0) {
+    context.ui.notify("No available Pi models were found.", "warning");
+    return undefined;
+  }
 
-  const tools = [...new Set(toolsText.split(",").map((tool) => tool.trim()).filter(Boolean))];
-  const edited: RoleRoute = {
-    ...existing,
-    model,
-    thinking,
-    mode,
-    tools,
-  };
-  if (purpose.trim()) edited.purpose = purpose;
-  else delete edited.purpose;
-  if (instructions.trim()) edited.instructions = instructions;
-  else delete edited.instructions;
-  if (runnerChoice === "inherit") delete edited.runner;
-  else edited.runner = runnerChoice;
-  if (transportChoice === "inherit") delete edited.transport;
-  else edited.transport = transportChoice;
-  if (extensionsChoice === "inherit") delete edited.extensions;
-  else edited.extensions = extensionsChoice === "enabled";
-  return edited;
+  return context.ui.custom<RoleRoute | undefined>((tui, theme, _keybindings, done) => {
+    const draft = cloneRoleDraft(existing);
+    const commitOptionalString = (id: "purpose" | "instructions", value: string): void => {
+      if (value.trim()) draft[id] = value;
+      else delete draft[id];
+    };
+    const settings: SettingItem[] = [
+      {
+        id: "model",
+        label: "Model",
+        description: "Search the available Pi models and select one.",
+        currentValue: draft.model || "(choose a model)",
+        submenu: (_current, submenuDone) => new ModelSelectorComponent(theme, availableModels, draft.model, submenuDone),
+      },
+      {
+        id: "thinking",
+        label: "Thinking",
+        description: "Reasoning effort for this role.",
+        currentValue: draft.thinking,
+        submenu: (current, submenuDone) => new RoleChoicePicker("Thinking level", THINKING_LEVEL_CHOICES, current, getSelectListTheme(), submenuDone),
+      },
+      {
+        id: "mode",
+        label: "Mode",
+        description: "Role policy metadata used by the routing workflow.",
+        currentValue: draft.mode,
+        submenu: (current, submenuDone) => new RoleChoicePicker("Role mode", MODE_CHOICES, current, getSelectListTheme(), submenuDone),
+      },
+      {
+        id: "tools",
+        label: "Tools",
+        description: "Choose the exact allowlist. An empty selection is valid.",
+        currentValue: toolsDisplayValue(draft.tools),
+        submenu: (_current, submenuDone) => new ToolSelectorComponent(
+          theme,
+          buildToolCatalog(draft.tools),
+          draft.tools,
+          (tools) => submenuDone(tools?.join(", ")),
+        ),
+      },
+      {
+        id: "purpose",
+        label: "Purpose",
+        currentValue: draft.purpose?.trim() || "(none)",
+        submenu: (_current, submenuDone) => makeTextEditor(tui, theme, draft.purpose ?? "", false, submenuDone),
+      },
+      {
+        id: "instructions",
+        label: "Instructions",
+        currentValue: draft.instructions?.trim() || "(none)",
+        submenu: (_current, submenuDone) => makeTextEditor(tui, theme, draft.instructions ?? "", true, submenuDone),
+      },
+      {
+        id: "runner",
+        label: "Runner",
+        currentValue: optionalChoice(draft.runner),
+        submenu: (current, submenuDone) => new RoleChoicePicker("Runner", RUNNER_CHOICES, current, getSelectListTheme(), submenuDone),
+      },
+      {
+        id: "transport",
+        label: "Transport",
+        currentValue: optionalChoice(draft.transport),
+        submenu: (current, submenuDone) => new RoleChoicePicker("Transport", TRANSPORT_CHOICES, current, getSelectListTheme(), submenuDone),
+      },
+      {
+        id: "extensions",
+        label: "Extensions",
+        currentValue: extensionChoice(draft.extensions),
+        submenu: (current, submenuDone) => new RoleChoicePicker("Extensions", EXTENSION_CHOICES, current, getSelectListTheme(), submenuDone),
+      },
+      { id: "save", label: "Save", currentValue: "Save changes", values: ["Save changes"] },
+      { id: "cancel", label: "Cancel", currentValue: "Discard changes", values: ["Discard changes"] },
+    ];
+    const container = new Container();
+    container.addChild(new Text(theme.fg("accent", theme.bold(`Edit role: ${name}`)), 1, 1));
+    container.addChild(new Text(theme.fg("muted", "Current values are shown below; changes are staged until Save."), 1, 0));
+    const settingsList = new SettingsList(
+      settings,
+      Math.min(settings.length, 15),
+      getSettingsListTheme(),
+      (id, value) => {
+        if (id === "save") {
+          done({ ...draft, tools: [...draft.tools] });
+          return;
+        }
+        if (id === "cancel") {
+          done(undefined);
+          return;
+        }
+        if (id === "model") draft.model = value;
+        else if (id === "thinking") draft.thinking = value as ThinkingLevel;
+        else if (id === "mode") draft.mode = value as RoleMode;
+        else if (id === "tools") draft.tools = uniqueToolNames(value.split(","));
+        else if (id === "purpose" || id === "instructions") commitOptionalString(id, value);
+        else if (id === "runner") {
+          if (value === "inherit") delete draft.runner;
+          else draft.runner = value as RoleRunner;
+        } else if (id === "transport") {
+          if (value === "inherit") delete draft.transport;
+          else draft.transport = value as RoleTransport;
+        } else if (id === "extensions") {
+          if (value === "inherit") delete draft.extensions;
+          else draft.extensions = value === "enabled";
+        }
+      },
+      () => done(undefined),
+    );
+    container.addChild(settingsList);
+    return {
+      render: (width) => container.render(width).map((line) => truncateToWidth(line, width)),
+      handleInput: (data) => {
+        settingsList.handleInput(data);
+        tui.requestRender();
+      },
+      invalidate: () => container.invalidate(),
+    };
+  }, { overlay: true });
 };
 
 const addRole = async (context: ExtensionCommandContext, config: RoutingConfig): Promise<boolean> => {
@@ -368,18 +691,26 @@ const addRole = async (context: ExtensionCommandContext, config: RoutingConfig):
   return true;
 };
 
-const renameRole = async (context: ExtensionCommandContext, config: RoutingConfig, oldName: string): Promise<string | undefined> => {
+export const renameRole = async (context: ExtensionCommandContext, config: RoutingConfig, oldName: string): Promise<string | undefined> => {
   const newName = await context.ui.input("Rename role", oldName);
   if (newName === undefined || newName === oldName) return undefined;
   if (!ROLE_NAME_PATTERN.test(newName) || config.roles[newName]) {
     context.ui.notify(`Role names must match ${ROLE_NAME_PATTERN.source} and be unique.`, "warning");
     return undefined;
   }
-  const route = config.roles[oldName];
-  delete config.roles[oldName];
-  config.roles[newName] = route;
-  saveRoutingConfig(config);
-  context.ui.notify(`Renamed ${oldName} to ${newName}.`, "info");
+  const references = [
+    config.dispatch?.primaryRole === oldName ? "dispatch.primaryRole" : undefined,
+    config.dispatch?.defaultImplementationRole === oldName ? "dispatch.defaultImplementationRole" : undefined,
+  ].filter((value): value is string => value !== undefined);
+  const fallbackMaterialization = oldName === "orchestrator" && config.dispatch?.primaryRole === undefined;
+  const confirmed = await context.ui.confirm(
+    `Rename ${oldName} to ${newName}?`,
+    `${references.length > 0 ? `This migrates ${references.join(" and ")}. ` : ""}${fallbackMaterialization ? "This will set dispatch.primaryRole so automatic startup continues. " : ""}External dispatches and prompts using ${oldName} cannot be rewritten; they must use ${newName}. Continue?`,
+  );
+  if (!confirmed) return undefined;
+  const migration = migrateRoleReferences(config, oldName, newName);
+  saveRoutingConfig(migration.config);
+  context.ui.notify(`Renamed ${oldName} to ${newName}. External dispatches and prompts must use ${newName}.`, "info");
   return newName;
 };
 
@@ -388,14 +719,22 @@ const removeRole = async (context: ExtensionCommandContext, config: RoutingConfi
     context.ui.notify("Cannot remove the last role; the routing file must contain at least one role.", "warning");
     return false;
   }
+  const references = [
+    config.dispatch?.primaryRole === name ? "dispatch.primaryRole" : undefined,
+    config.dispatch?.defaultImplementationRole === name ? "dispatch.defaultImplementationRole" : undefined,
+  ].filter((value): value is string => value !== undefined);
+  const fallbackWarning = name === "orchestrator" && config.dispatch?.primaryRole === undefined
+    ? " Automatic primary assignment will stop."
+    : "";
   const confirmed = await context.ui.confirm(
     `Remove role ${name}?`,
-    `This permanently removes the ${name} route from ${getRoutingConfigPath()}. Continue?`,
+    `This permanently removes the ${name} route from ${getRoutingConfigPath()}.${references.length > 0 ? ` It will clear ${references.join(" and ")}.` : ""}${fallbackWarning} Continue?`,
   );
   if (!confirmed) return false;
-  const nextRoles = { ...config.roles };
-  delete nextRoles[name];
-  saveRoutingConfig({ ...config, roles: nextRoles });
+  const nextConfig = { ...config, roles: { ...config.roles } };
+  delete nextConfig.roles[name];
+  removeRoleReferences(nextConfig, name);
+  saveRoutingConfig(nextConfig);
   context.ui.notify(`Removed role ${name}.`, "info");
   return true;
 };
@@ -497,8 +836,11 @@ export default function piFabricRoleRouter(pi: ExtensionAPI): void {
     const routingGuidance = "Pi Fabric role routing: dispatch child work inside fabric_exec with roles.run({ role, task, ... }) or roles.spawn({ role, task, ... }). Use roles.create({ role, name, instructions? }) only when a new persistent actor is intended. Do not pass model, thinking, tools, runner, transport, or extensions at dispatch sites; the central role resolver supplies and enforces them. Role instructions are combined with the supplied task by the wrapper.";
     const additions = [routingGuidance];
     if (!process.env.PI_FABRIC_PARENT_RUN) {
-      const instructions = loadRoutingConfig().roles.orchestrator?.instructions?.trim();
-      if (instructions) additions.push(`Orchestrator role instructions:\n${instructions}`);
+      const config = loadRoutingConfig();
+      const primaryName = resolvePrimaryRoleName(config);
+      additions.push(formatRoleCatalog(config));
+      const instructions = primaryName ? config.roles[primaryName]?.instructions?.trim() : undefined;
+      if (instructions) additions.push(`Primary role (${primaryName}) instructions:\n${instructions}`);
     }
     return { systemPrompt: `${event.systemPrompt}\n\n${additions.join("\n\n")}` };
   });

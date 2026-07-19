@@ -21,7 +21,7 @@ return await roles.run({
 - `/fabric-role` for an interactive role manager, with `/roles` retained as an alias.
 - `/fabric-role list` and `/roles list` for detailed text-mode mappings.
 - Optional role `purpose` and `instructions`; instructions are combined before the caller's task or actor instructions.
-- Automatic top-level assignment from the conventional `orchestrator` role.
+- Configurable automatic top-level assignment through `dispatch.primaryRole`, with the conventional `orchestrator` fallback.
 
 ## Requirements
 
@@ -62,7 +62,7 @@ $EDITOR ~/.pi/agent/fabric-routing.json
 /roles                 (alias)
 ```
 
-The top-level picker lists roles plus Add, Refresh, and Close. Selecting a role opens its detail/action submenu with model, thinking, mode, tools, purpose, instructions, runner, transport, and extensions, plus Edit, Rename, Remove, and Back. Editing includes a searchable model selection, thinking, mode, comma-separated tools, purpose, optional multi-line instructions, and optional runner, transport, and extension settings. Selecting `inherit` removes an optional field from the saved route rather than writing a sentinel value.
+The top-level picker lists roles plus Add, Refresh, and Close. Selecting a role opens its detail/action submenu with model, thinking, mode, tools, purpose, instructions, runner, transport, and extensions, plus Edit, Rename, Remove, and Back. Editing opens a stateful settings screen that immediately shows every current value. Model uses a searchable Vision Handoff-style picker; thinking and mode use current-value choice menus; tools use a checklist with the current allowlist preselected (`read`, `grep`, `find`, `ls`, `edit`, `write`, `bash`, plus existing custom tools); purpose and optional multi-line instructions use prefilled editors. Runner, transport, and extension settings also show their current or inherited value. Changes remain staged until **Save**, and **Cancel** discards them. Purpose and instructions are editable under `/fabric-role > role > Edit`: purpose tells the primary orchestrator when to choose a role, while instructions govern the dispatched worker and are prepended to its task. Selecting `inherit` removes an optional field from the saved route rather than writing a sentinel value.
 
 Reload Pi with `/reload` or start a fresh process after installing or changing extension code. The routing file is read each turn for Fabric dispatch and top-level prompt preparation, so configuration edits take effect without rebuilding the extension.
 
@@ -84,11 +84,18 @@ Each role supports:
 | `thinking` | yes | `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max` |
 | `tools` | yes | Exact tool allowlist for the Fabric child |
 | `mode` | yes | Descriptive policy metadata: `primary`, `primary-or-advisory`, or `subagent` |
-| `purpose` | no | Human-readable purpose shown by the manager and text listing |
-| `instructions` | no | Role guidance prepended to a one-shot task or actor instructions |
+| `purpose` | no | Editable display metadata shown by the manager and text listing; it does not affect runtime |
+| `instructions` | no | Editable runtime guidance prepended to a one-shot task or actor instructions |
 | `runner` | no | Optional Pi Fabric runner: `pi` or `claude`; omit to inherit the Fabric default |
 | `transport` | no | Optional child transport: `auto`, `process`, `tmux`, `screen`, or `localterm`; omit to inherit |
 | `extensions` | no | Optional child extension policy: `true` to enable or `false` to disable; omit to inherit |
+
+The optional `dispatch` object controls router-owned internal references:
+
+| Field | Meaning |
+|---|---|
+| `primaryRole` | Role used for automatic top-level startup model/thinking and primary instructions. If omitted, `orchestrator` is used only when that conventional role exists. |
+| `defaultImplementationRole` | Router-owned default implementation role reference preserved and migrated by role rename; it does not itself trigger startup assignment. |
 
 Unknown top-level configuration keys and unknown route fields are preserved by the manager. Writes are validated before an atomic same-directory replacement.
 
@@ -148,11 +155,11 @@ roles.run({ role: "implement", task: "..." });
 
 No actor is required to use this extension. `roles.run` and `roles.spawn` create one-shot agents only; they do not create or modify persistent actors. Existing Fabric actors retain their own settings and are untouched. Only `roles.create` routes a newly created actor through a role. Global actor imports remain managed by Pi Fabric. This extension does not change Fabric's actor lifecycle, persistence, mailbox behavior, or global actor registry.
 
-## Orchestrator behavior
+## Primary role behavior
 
-If a role named `orchestrator` exists, the extension selects its `model` and `thinking` for a top-level Pi session at startup. Its optional `instructions` are appended to the top-level Pi `before_agent_start` system prompt on every turn. Generic routing guidance is appended in both top-level and Fabric child/actor sessions, but orchestrator instructions are excluded from Fabric children when `PI_FABRIC_PARENT_RUN` is set so a selected child role does not inherit top-level guidance.
+Set `dispatch.primaryRole` to the role whose `model` and `thinking` should be selected for a top-level Pi session at startup. Its optional `instructions` are appended to the top-level Pi `before_agent_start` system prompt on every turn. If `dispatch.primaryRole` is absent and `orchestrator` exists, `orchestrator` remains the conventional fallback. If neither is available, no automatic primary assignment occurs. `mode: "primary"` is descriptive and does not select a role by itself.
 
-`mode: "primary"` is descriptive; the conventional role name `orchestrator` triggers top-level selection. The routing file is reloaded for each prompt hook and Fabric dispatch, so edits apply on the next turn.
+The routing file is reloaded for each prompt hook and Fabric dispatch, so edits apply on the next turn. A live catalog containing every role name, mode, and purpose is injected into the primary session each turn; newly added or renamed roles therefore become visible to the orchestrator without editing Markdown. Renaming migrates the internal `dispatch.primaryRole` and `dispatch.defaultImplementationRole` references when they point at the renamed role. Renaming the fallback `orchestrator` materializes `dispatch.primaryRole` to preserve automatic startup. External dispatches and prompts cannot be rewritten; update those callers to use the new role name. Renames and removals always require confirmation. Removing a referenced primary/default role clears the internal reference, and removing the fallback orchestrator warns that automatic assignment will stop.
 
 ## How it works
 

@@ -1,4 +1,8 @@
 {
+  "dispatch": {
+    "primaryRole": "orchestrator",
+    "defaultImplementationRole": "implement"
+  },
   "roles": {
     "orchestrator": {
       "model": "your-provider/your-planning-model",

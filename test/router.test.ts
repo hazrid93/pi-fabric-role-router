@@ -6,10 +6,13 @@ import { ModuleKind, ScriptTarget, transpileModule } from "typescript";
 import router, {
   buildRolePrelude,
   combineRoleInstructions,
-  editRole,
+  formatRoleCatalog,
   formatRoleDetails,
+  getRoleSettingValues,
   formatRoleDetail,
   loadRoutingConfig,
+  migrateRoleReferences,
+  resolvePrimaryRoleName,
   saveRoutingConfig,
   validateRoutingConfig,
 } from "../src/index.js";
@@ -117,58 +120,67 @@ describe("Pi Fabric role router", () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
-  it("lets the role editor set or delete optional runner, transport, and extension fields", async () => {
-    const selections = new Map<string, string>([
-      ["Select model", "example/new-model — New model"],
-      ["Thinking level", "high"],
-      ["Role mode", "subagent"],
-      ["Runner", "inherit"],
-      ["Transport", "inherit"],
-      ["Extensions", "inherit"],
-    ]);
-    const context = {
-      modelRegistry: {
-        getAvailable: () => [{ provider: "example", id: "new-model", name: "New model" }],
-      },
-      ui: {
-        input: async (prompt: string) => {
-          if (prompt === "Search available models") return "example/new-model";
-          if (prompt === "Tools (comma-separated)") return "read, edit";
-          if (prompt === "Purpose (optional)") return "";
-          return undefined;
-        },
-        select: async (prompt: string) => selections.get(prompt),
-        editor: async () => "",
-      },
+  it("resolves an explicit primary role, conventional fallback, or no automatic role", () => {
+    const route = {
+      model: "example/model",
+      thinking: "medium" as const,
+      tools: [],
+      mode: "subagent" as const,
     };
-    const edited = await editRole(context as never, "implement", {
-      model: "example/old-model",
-      thinking: "low",
-      tools: ["read"],
-      mode: "primary-or-advisory",
-      purpose: "Old purpose",
-      instructions: "Old instructions",
-      runner: "claude",
-      transport: "tmux",
-      extensions: true,
-      futureRouteField: "preserve",
-    });
+    expect(resolvePrimaryRoleName({ roles: { plan: route }, dispatch: { primaryRole: "plan" } })).toBe("plan");
+    expect(resolvePrimaryRoleName({ roles: { orchestrator: route } })).toBe("orchestrator");
+    expect(resolvePrimaryRoleName({ roles: { plan: route }, dispatch: { primaryRole: "missing" } })).toBeUndefined();
+    expect(resolvePrimaryRoleName({ roles: { plan: route } })).toBeUndefined();
+  });
 
-    expect(edited).toEqual({
-      model: "example/new-model",
-      thinking: "high",
-      tools: ["read", "edit"],
-      mode: "subagent",
-      futureRouteField: "preserve",
+  it("migrates only router-owned rename references and preserves unknown dispatch fields", () => {
+    const route = {
+      model: "example/model",
+      thinking: "medium" as const,
+      tools: [],
+      mode: "subagent" as const,
+    };
+    const config = validateRoutingConfig({
+      dispatch: {
+        primaryRole: "orchestrator",
+        defaultImplementationRole: "orchestrator",
+        futureDispatchField: { keep: true },
+      },
+      roles: { orchestrator: route, review: route },
     });
+    const migration = migrateRoleReferences(config, "orchestrator", "lead");
+    expect(migration.migrated).toEqual(["dispatch.primaryRole", "dispatch.defaultImplementationRole"]);
+    expect(migration.config.dispatch).toEqual({
+      primaryRole: "lead",
+      defaultImplementationRole: "lead",
+      futureDispatchField: { keep: true },
+    });
+    expect(migration.config.roles.lead).toBe(route);
+  });
 
-    selections.set("Runner", "pi");
-    selections.set("Transport", "localterm");
-    selections.set("Extensions", "disabled");
-    const configured = await editRole(context as never, "implement", edited!);
-    expect(configured?.runner).toBe("pi");
-    expect(configured?.transport).toBe("localterm");
-    expect(configured?.extensions).toBe(false);
+  it("materializes primaryRole when renaming the conventional fallback", () => {
+    const route = {
+      model: "example/model",
+      thinking: "medium" as const,
+      tools: [],
+      mode: "primary" as const,
+    };
+    const migration = migrateRoleReferences(validateRoutingConfig({ roles: { orchestrator: route, review: route } }), "orchestrator", "lead");
+    expect(migration.materializedPrimary).toBe(true);
+    expect(migration.config.dispatch?.primaryRole).toBe("lead");
+  });
+
+  it("filters model picker items across provider, id, name, and capabilities without vision-only filtering", async () => {
+    const { buildModelSelectorItems, filterModelSelectorItems } = await import("../src/model-selector.js");
+    const items = buildModelSelectorItems([
+      { provider: "openai", id: "text-model", name: "Text Model", reasoning: true },
+      { provider: "anthropic", id: "vision-model", name: "Vision Model", input: ["text", "image"] },
+    ]);
+    expect(items).toHaveLength(2);
+    expect(filterModelSelectorItems(items, "vision").map((item) => item.ref)).toEqual(["anthropic/vision-model"]);
+    expect(filterModelSelectorItems(items, "openai").map((item) => item.ref)).toEqual(["openai/text-model"]);
+    expect(items[0]?.reasoning).toBe(true);
+    expect(items[1]?.image).toBe(true);
   });
 
   it("rejects empty actor instructions before agents.create in the generated prelude", () => {
@@ -253,4 +265,25 @@ describe("Pi Fabric role router", () => {
     expect(JSON.parse(readFileSync(join(dir, "fabric-routing.json"), "utf8"))).toEqual(config);
     rmSync(dir, { recursive: true, force: true });
   });
+  it("shows all current role values and preserves tool selections", async () => {
+    const route = { model: "example/current", thinking: "xhigh" as const, mode: "primary-or-advisory" as const, tools: ["read", "custom-tool"], purpose: "Analyze architecture.", instructions: "Stay read-only.", runner: "pi" as const, transport: "tmux" as const, extensions: false };
+    expect(getRoleSettingValues(route)).toEqual({ model: "example/current", thinking: "xhigh", mode: "primary-or-advisory", tools: "read, custom-tool", purpose: "Analyze architecture.", instructions: "Stay read-only.", runner: "pi", transport: "tmux", extensions: "disabled" });
+    const { buildToolCatalog, toggleToolSelection, moveToolSelection } = await import("../src/tool-selector.js");
+    const catalog = buildToolCatalog(["custom-tool"]);
+    expect(catalog).toContain("read");
+    expect(catalog).toContain("custom-tool");
+    expect(toggleToolSelection(["read"], "edit", catalog)).toEqual(["read", "edit"]);
+    expect(toggleToolSelection(["read", "edit"], "read", catalog)).toEqual(["edit"]);
+    expect(moveToolSelection(0, 3, "up")).toBe(2);
+  });
+
+  it("formats a live purpose catalog without concrete model or tool mappings", () => {
+    const config = validateRoutingConfig({ dispatch: { primaryRole: "lead", defaultImplementationRole: "build" }, roles: { lead: { model: "example/lead", thinking: "high", tools: [], mode: "primary", purpose: "Coordinate work." }, build: { model: "example/build", thinking: "high", tools: ["edit"], mode: "subagent", purpose: "Implement changes." } } });
+    const catalog = formatRoleCatalog(config);
+    expect(catalog).toContain("lead [primary] (primary): Coordinate work.");
+    expect(catalog).toContain("build [subagent] (default implementation): Implement changes.");
+    expect(catalog).not.toContain("example/lead");
+    expect(catalog).not.toContain("tools:");
+  });
+
 });

@@ -1,6 +1,6 @@
 {
   "name": "pi-fabric-role-router",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Centralized role-based model, thinking, and tool routing for Pi Fabric",
   "type": "module",
   "main": "./src/index.ts",
@@ -42,6 +42,7 @@
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": ">=0.80.6",
+    "@earendil-works/pi-tui": ">=0.80.6",
     "pi-fabric": ">=0.21.10"
   },
   "peerDependenciesMeta": {
@@ -51,6 +52,7 @@
   },
   "devDependencies": {
     "@earendil-works/pi-coding-agent": "0.80.10",
+    "@earendil-works/pi-tui": "0.80.10",
     "@types/node": "^25.0.0",
     "typescript": "^6.0.3",
     "vitest": "^4.1.0"
