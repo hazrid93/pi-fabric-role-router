@@ -5,14 +5,16 @@
       "thinking": "high",
       "tools": [],
       "mode": "primary",
-      "purpose": "Frame tasks, delegate work, synthesize results, and verify outcomes."
+      "purpose": "Frame tasks, delegate work, synthesize results, and verify outcomes.",
+      "instructions": "Own task framing, bounded delegation, synthesis, integration, and final verification."
     },
     "plan": {
       "model": "your-provider/your-planning-model",
       "thinking": "high",
       "tools": ["read", "grep", "find", "ls"],
       "mode": "primary-or-advisory",
-      "purpose": "Produce read-only architecture and implementation plans."
+      "purpose": "Produce read-only architecture and implementation plans.",
+      "instructions": "Remain read-only and explain assumptions, decomposition, and verification needs."
     },
     "implement": {
       "model": "your-provider/your-implementation-model",
@@ -20,7 +22,8 @@
       "tools": ["read", "grep", "find", "ls", "edit", "write", "bash"],
       "mode": "subagent",
       "extensions": true,
-      "purpose": "Implement code changes and run focused verification."
+      "purpose": "Implement code changes and run focused verification.",
+      "instructions": "Own substantive implementation and focused validation; do not broaden the task."
     },
     "review": {
       "model": "your-provider/your-review-model",
@@ -28,7 +31,8 @@
       "tools": ["read", "grep", "find", "ls"],
       "mode": "subagent",
       "extensions": true,
-      "purpose": "Review correctness, architecture, security, and tests without editing."
+      "purpose": "Review correctness, architecture, security, and tests without editing.",
+      "instructions": "Review read-only and report concrete findings with severity and evidence."
     }
   }
 }
