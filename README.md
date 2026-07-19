@@ -166,7 +166,7 @@ Pi Fabric remains the agent runtime; this project supplies centralized role rout
 npm install
 npm run check
 npm pack --dry-run
-pi -e ./dist/index.js
+pi -e ./src/index.ts
 ```
 
 ## Related projects
