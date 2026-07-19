@@ -1,0 +1,64 @@
+{
+  "name": "pi-fabric-role-router",
+  "version": "0.1.0",
+  "description": "Centralized role-based model, thinking, and tool routing for Pi Fabric",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist/",
+    "examples/",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "pi-fabric",
+    "roles",
+    "routing",
+    "agents",
+    "orchestration",
+    "multi-agent"
+  ],
+  "license": "MIT",
+  "author": "hazrid93",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/hazrid93/pi-fabric-role-router.git"
+  },
+  "homepage": "https://github.com/hazrid93/pi-fabric-role-router#readme",
+  "bugs": {
+    "url": "https://github.com/hazrid93/pi-fabric-role-router/issues"
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "pi": {
+    "extensions": [
+      "./dist/index.js"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": ">=0.80.6",
+    "pi-fabric": ">=0.21.10"
+  },
+  "peerDependenciesMeta": {
+    "pi-fabric": {
+      "optional": false
+    }
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "0.80.10",
+    "@types/node": "^25.0.0",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.0"
+  },
+  "scripts": {
+    "clean": "rm -rf dist",
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "check": "npm run typecheck && npm run test && npm run build"
+  }
+}

@@ -1,0 +1,34 @@
+{
+  "roles": {
+    "orchestrator": {
+      "model": "your-provider/your-planning-model",
+      "thinking": "high",
+      "tools": [],
+      "mode": "primary",
+      "purpose": "Frame tasks, delegate work, synthesize results, and verify outcomes."
+    },
+    "plan": {
+      "model": "your-provider/your-planning-model",
+      "thinking": "high",
+      "tools": ["read", "grep", "find", "ls"],
+      "mode": "primary-or-advisory",
+      "purpose": "Produce read-only architecture and implementation plans."
+    },
+    "implement": {
+      "model": "your-provider/your-implementation-model",
+      "thinking": "high",
+      "tools": ["read", "grep", "find", "ls", "edit", "write", "bash"],
+      "mode": "subagent",
+      "extensions": true,
+      "purpose": "Implement code changes and run focused verification."
+    },
+    "review": {
+      "model": "your-provider/your-review-model",
+      "thinking": "high",
+      "tools": ["read", "grep", "find", "ls"],
+      "mode": "subagent",
+      "extensions": true,
+      "purpose": "Review correctness, architecture, security, and tests without editing."
+    }
+  }
+}
