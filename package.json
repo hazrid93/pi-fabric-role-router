@@ -59,6 +59,7 @@
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
+    "prepare": "npm run build",
     "check": "npm run typecheck && npm run test && npm run build"
   }
 }
