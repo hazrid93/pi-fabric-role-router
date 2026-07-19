@@ -1,19 +1,27 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
+import { fileURLToPath } from "node:url";
 import { ModuleKind, ScriptTarget, transpileModule } from "typescript";
 import router, {
+  bootstrapRoutingConfig,
   buildRolePrelude,
   combineRoleInstructions,
+  ensureRoutingConfig,
+  formatModelRef,
   formatRoleCatalog,
   formatRoleDetails,
-  getRoleSettingValues,
   formatRoleDetail,
+  getBundledExamplePath,
+  getRoleSettingValues,
   loadRoutingConfig,
   migrateRoleReferences,
+  missingConfigMessage,
   resolvePrimaryRoleName,
   saveRoutingConfig,
+  seedTemplateModels,
+  setBundledExamplePath,
   validateRoutingConfig,
 } from "../src/index.js";
 
@@ -31,6 +39,7 @@ describe("Pi Fabric role router", () => {
     else process.env.PI_CODING_AGENT_DIR = originalDir;
     if (originalParentRun === undefined) delete process.env.PI_FABRIC_PARENT_RUN;
     else process.env.PI_FABRIC_PARENT_RUN = originalParentRun;
+    setBundledExamplePath(undefined);
   });
 
   it("registers hooks and injects role wrappers into fabric_exec", () => {
@@ -284,6 +293,193 @@ describe("Pi Fabric role router", () => {
     expect(catalog).toContain("build [subagent] (default implementation): Implement changes.");
     expect(catalog).not.toContain("example/lead");
     expect(catalog).not.toContain("tools:");
+  });
+
+  describe("first-run config installation", () => {
+    const exampleTemplate = () => JSON.stringify({
+      dispatch: { primaryRole: "orchestrator", defaultImplementationRole: "implement" },
+      roles: {
+        orchestrator: { model: "your-provider/your-model", thinking: "high", tools: [], mode: "primary", purpose: "Lead.", instructions: "Lead." },
+        implement: { model: "your-provider/your-model", thinking: "high", tools: ["read", "edit", "bash"], mode: "subagent", extensions: true, purpose: "Build.", instructions: "Build." },
+        review: { model: "your-provider/your-model", thinking: "high", tools: ["read"], mode: "subagent", purpose: "Review.", instructions: "Review." },
+      },
+    });
+
+    it("formatModelRef joins provider and id with a slash", () => {
+      expect(formatModelRef("openai", "gpt-4o")).toBe("openai/gpt-4o");
+    });
+
+    it("getBundledExamplePath resolves to the shipped package example", () => {
+      const path = getBundledExamplePath();
+      expect(path.endsWith(join("examples", "fabric-routing.json"))).toBe(true);
+      expect(existsSync(path)).toBe(true);
+    });
+
+    it("seeds every role placeholder with the current model ref and preserves all other fields", () => {
+      const examplePath = join(dirname(fileURLToPath(import.meta.url)), "..", "examples", "fabric-routing.json");
+      const parsed = JSON.parse(readFileSync(examplePath, "utf8")) as { dispatch?: unknown; roles: Record<string, Record<string, unknown>> };
+      expect(String(parsed.roles.orchestrator.model)).toContain("your-provider");
+      const seeded = seedTemplateModels(parsed, "openai/gpt-4o");
+      expect(Object.keys(seeded.roles).sort()).toEqual(Object.keys(parsed.roles).sort());
+      for (const [name, original] of Object.entries(parsed.roles)) {
+        const route = seeded.roles[name] as Record<string, unknown>;
+        expect(route.model).toBe("openai/gpt-4o");
+        expect(route.model).not.toBe(original.model);
+        for (const [key, value] of Object.entries(original)) {
+          if (key === "model") continue;
+          expect(route[key]).toEqual(value);
+        }
+      }
+      expect(seeded.dispatch).toEqual(parsed.dispatch);
+    });
+
+    it("bootstrap creates a valid config with the seeded model ref and mode 0600", () => {
+      const dir = mkdtempSync(join(tmpdir(), "pi-fabric-role-router-bootstrap-"));
+      const target = join(dir, "fabric-routing.json");
+      const outcome = bootstrapRoutingConfig({ modelRef: "anthropic/claude", templateContent: exampleTemplate(), targetPath: target });
+      expect(outcome).toEqual({ created: true, path: target });
+      const written = JSON.parse(readFileSync(target, "utf8"));
+      const validated = validateRoutingConfig(written);
+      expect(validated.roles.orchestrator.model).toBe("anthropic/claude");
+      expect(validated.roles.implement.model).toBe("anthropic/claude");
+      expect(validated.roles.review.model).toBe("anthropic/claude");
+      expect(statSync(target).mode & 0o777).toBe(0o600);
+      rmSync(dir, { recursive: true, force: true });
+    });
+
+    it("bootstrap leaves an existing config untouched byte-for-byte", () => {
+      const dir = mkdtempSync(join(tmpdir(), "pi-fabric-role-router-existing-"));
+      const target = join(dir, "fabric-routing.json");
+      const original = `${JSON.stringify({
+        roles: { custom: { model: "example/custom", thinking: "medium", tools: ["read"], mode: "subagent" } },
+      }, null, 2)}`;
+      writeFileSync(target, original, { mode: 0o600 });
+      const outcome = bootstrapRoutingConfig({ modelRef: "openai/gpt-4o", templateContent: exampleTemplate(), targetPath: target });
+      expect(outcome).toEqual({ created: false, reason: "exists", path: target });
+      expect(readFileSync(target, "utf8")).toBe(original);
+      rmSync(dir, { recursive: true, force: true });
+    });
+
+    it("bootstrap fails without writing when the bundled template is invalid", () => {
+      const dir = mkdtempSync(join(tmpdir(), "pi-fabric-role-router-invalid-"));
+      const target = join(dir, "fabric-routing.json");
+      const invalidTemplates = [
+        "not-json{",
+        JSON.stringify({ roles: {} }),
+        JSON.stringify({ roles: { "Bad Name": { model: "x/y", thinking: "high", tools: [], mode: "primary" } } }),
+        JSON.stringify({ roles: { ok: { model: "x/y", thinking: "bogus", tools: [], mode: "primary" } } }),
+      ];
+      for (const templateContent of invalidTemplates) {
+        const outcome = bootstrapRoutingConfig({ modelRef: "openai/gpt-4o", templateContent, targetPath: target });
+        if (outcome.created || outcome.reason !== "template") throw new Error(`expected template error for: ${templateContent}`);
+        expect(outcome.error.length).toBeGreaterThan(0);
+        expect(existsSync(target)).toBe(false);
+      }
+      rmSync(dir, { recursive: true, force: true });
+    });
+
+    it("ensureRoutingConfig writes nothing and reports no-model when the host has no current model", () => {
+      const dir = mkdtempSync(join(tmpdir(), "pi-fabric-role-router-nomodel-"));
+      const target = join(dir, "fabric-routing.json");
+      const contexts: Array<{ model: unknown }> = [
+        { model: undefined },
+        { model: { id: "gpt-4o" } },
+        { model: { provider: "openai" } },
+        { model: {} },
+      ];
+      for (const context of contexts) {
+        const outcome = ensureRoutingConfig(context as never, { templateContent: exampleTemplate(), targetPath: target });
+        expect(outcome).toEqual({ created: false, reason: "no-model" });
+        expect(existsSync(target)).toBe(false);
+      }
+      rmSync(dir, { recursive: true, force: true });
+    });
+
+    it("session_start bootstraps on first run, notifies once, then stays quiet", async () => {
+      const dir = mkdtempSync(join(tmpdir(), "pi-fabric-role-router-session-"));
+      process.env.PI_CODING_AGENT_DIR = dir;
+      delete process.env.PI_FABRIC_PARENT_RUN;
+      const templatePath = join(dir, "template.json");
+      writeFileSync(templatePath, exampleTemplate());
+      setBundledExamplePath(templatePath);
+
+      const notifications: Array<{ message: string; type: string }> = [];
+      const context = {
+        model: { provider: "openai", id: "gpt-4o" },
+        modelRegistry: { find: () => ({ provider: "openai", id: "gpt-4o" }) },
+        ui: { notify: (message: string, type: string) => { notifications.push({ message, type }); } },
+      };
+      const hooks = new Map<string, Function>();
+      const pi = {
+        on(name: string, handler: Function) { hooks.set(name, handler); },
+        registerCommand() {},
+        setThinkingLevel() {},
+        async setModel() { return true; },
+      };
+      router(pi as never);
+
+      const sessionStart = hooks.get("session_start")!;
+      await sessionStart({}, context);
+
+      const target = join(dir, "fabric-routing.json");
+      expect(existsSync(target)).toBe(true);
+      const written = JSON.parse(readFileSync(target, "utf8"));
+      expect(written.roles.orchestrator.model).toBe("openai/gpt-4o");
+      expect(statSync(target).mode & 0o777).toBe(0o600);
+      expect(notifications).toHaveLength(1);
+      expect(notifications[0].type).toBe("info");
+      expect(notifications[0].message).toContain(target);
+      expect(notifications[0].message).toContain("/fabric-role");
+
+      await sessionStart({}, context);
+      expect(notifications).toHaveLength(1);
+      expect(readFileSync(target, "utf8")).toBe(`${JSON.stringify(written, null, 2)}\n`);
+
+      rmSync(dir, { recursive: true, force: true });
+    });
+
+    it("session_start warns and writes nothing when no current model is available", async () => {
+      const dir = mkdtempSync(join(tmpdir(), "pi-fabric-role-router-nomodel-hook-"));
+      process.env.PI_CODING_AGENT_DIR = dir;
+      delete process.env.PI_FABRIC_PARENT_RUN;
+      const templatePath = join(dir, "template.json");
+      writeFileSync(templatePath, exampleTemplate());
+      setBundledExamplePath(templatePath);
+
+      const notifications: Array<{ message: string; type: string }> = [];
+      const context = {
+        model: undefined,
+        modelRegistry: { find: () => undefined },
+        ui: { notify: (message: string, type: string) => { notifications.push({ message, type }); } },
+      };
+      const hooks = new Map<string, Function>();
+      const pi = {
+        on(name: string, handler: Function) { hooks.set(name, handler); },
+        registerCommand() {},
+        setThinkingLevel() {},
+        async setModel() { return true; },
+      };
+      router(pi as never);
+
+      await hooks.get("session_start")!({}, context);
+      expect(existsSync(join(dir, "fabric-routing.json"))).toBe(false);
+      expect(notifications).toHaveLength(1);
+      expect(notifications[0].type).toBe("warning");
+      expect(notifications[0].message).toContain("no current model");
+      rmSync(dir, { recursive: true, force: true });
+    });
+
+    it("missing-config errors are actionable when hooks run before initialization", () => {
+      const dir = mkdtempSync(join(tmpdir(), "pi-fabric-role-router-missing-"));
+      process.env.PI_CODING_AGENT_DIR = dir;
+      delete process.env.PI_FABRIC_PARENT_RUN;
+      const file = join(dir, "fabric-routing.json");
+      const message = missingConfigMessage(file);
+      expect(message).toContain(file);
+      expect(message).toContain("Start a new Pi session");
+      expect(() => loadRoutingConfig()).toThrow(message);
+      rmSync(dir, { recursive: true, force: true });
+    });
   });
 
 });

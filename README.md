@@ -38,24 +38,9 @@ pi install npm:pi-fabric
 pi install git:github.com/hazrid93/pi-fabric-role-router
 ```
 
-Create the routing configuration:
+The routing configuration is generated automatically on first run. When Pi starts a session and `~/.pi/agent/fabric-routing.json` does not exist, this extension loads its bundled `examples/fabric-routing.json`, replaces every placeholder model with the host's current model (`provider/id`), and writes the result with mode `0600`. The generated config is immediately valid on any provider, and every role starts from the current model as a starting point. An existing file is never overwritten or merged; if another process creates it during startup, the race is resolved quietly and the winner's file is kept. When the file is created, Pi notifies once with the path and a suggestion to edit roles with `/fabric-role`; reload, resume, and new sessions stay quiet. If no current model is available at startup, no file is written and a warning explains how to proceed.
 
-```bash
-cp ~/.pi/agent/git/github.com/hazrid93/pi-fabric-role-router/examples/fabric-routing.json \
-  ~/.pi/agent/fabric-routing.json
-```
-
-Depending on Pi's package checkout layout/version, locate the example with:
-
-```bash
-find ~/.pi/agent -path '*pi-fabric-role-router/examples/fabric-routing.json'
-```
-
-Then edit every placeholder model, or open the manager after starting Pi:
-
-```bash
-$EDITOR ~/.pi/agent/fabric-routing.json
-```
+Refine per-role model, thinking, tools, and guidance interactively:
 
 ```text
 /fabric-role
@@ -65,6 +50,25 @@ $EDITOR ~/.pi/agent/fabric-routing.json
 The top-level picker lists roles plus Add, Refresh, and Close. Selecting a role opens its detail/action submenu with model, thinking, mode, tools, purpose, instructions, runner, transport, and extensions, plus Edit, Rename, Remove, and Back. Editing opens a stateful settings screen that immediately shows every current value. Model uses a searchable Vision Handoff-style picker; thinking and mode use current-value choice menus; tools use a checklist with the current allowlist preselected (`read`, `grep`, `find`, `ls`, `edit`, `write`, `bash`, plus existing custom tools); purpose and optional multi-line instructions use prefilled editors. Runner, transport, and extension settings also show their current or inherited value. Changes remain staged until **Save**, and **Cancel** discards them. Purpose and instructions are editable under `/fabric-role > role > Edit`: purpose tells the primary orchestrator when to choose a role, while instructions govern the dispatched worker and are prepended to its task. Selecting `inherit` removes an optional field from the saved route rather than writing a sentinel value.
 
 Reload Pi with `/reload` or start a fresh process after installing or changing extension code. The routing file is read each turn for Fabric dispatch and top-level prompt preparation, so configuration edits take effect without rebuilding the extension.
+
+<details>
+<summary>Manual recovery (optional)</summary>
+
+If automatic generation is unavailable (for example, no model is selected at startup), create the file by hand from the shipped example and edit the placeholder models:
+
+```bash
+cp ~/.pi/agent/git/github.com/hazrid93/pi-fabric-role-router/examples/fabric-routing.json \
+  ~/.pi/agent/fabric-routing.json
+$EDITOR ~/.pi/agent/fabric-routing.json
+```
+
+Depending on Pi's package checkout layout/version, locate the example with:
+
+```bash
+find ~/.pi/agent -path '*pi-fabric-role-router/examples/fabric-routing.json'
+```
+
+</details>
 
 ## Configuration
 

@@ -35,6 +35,7 @@ import {
   chmodSync,
   closeSync,
   existsSync,
+  fchmodSync,
   fsyncSync,
   mkdirSync,
   openSync,
@@ -45,6 +46,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { join, dirname, basename } from "node:path";
+import { fileURLToPath } from "node:url";
 
 export const CONFIG_FILE = "fabric-routing.json";
 export const ROLE_NAME_PATTERN = /^[a-z][a-z0-9_-]*$/;
@@ -213,8 +215,13 @@ export const removeRoleReferences = (config: RoutingConfig, name: string): strin
   return references;
 };
 
+/** Actionable guidance shown when the routing file is missing. */
+export const missingConfigMessage = (file: string): string =>
+  `Pi Fabric role routing is not configured: ${file} is missing. Start a new Pi session to generate it automatically from the current model, or create it manually (see the package README).`;
+
 export const loadRoutingConfig = (): RoutingConfig => {
   const file = getRoutingConfigPath();
+  if (!existsSync(file)) throw new Error(missingConfigMessage(file));
   let parsed: unknown;
   try {
     parsed = JSON.parse(readFileSync(file, "utf8"));
@@ -254,6 +261,157 @@ export const saveRoutingConfig = (value: unknown): RoutingConfig => {
     throw error;
   }
   return validated;
+};
+
+const reasonOf = (error: unknown): string => (error instanceof Error ? error.message : String(error));
+
+const isExistsError = (error: unknown): boolean =>
+  typeof error === "object" && error !== null && (error as NodeJS.ErrnoException).code === "EEXIST";
+
+/** Format a model reference in the provider/id form used by routing config. */
+export const formatModelRef = (provider: string, id: string): string => `${provider}/${id}`;
+
+/**
+ * Replace every role's placeholder model in the bundled template with the
+ * given model ref, preserving all other fields and role distinctions. Pure:
+ * validates the result without touching the filesystem.
+ */
+export const seedTemplateModels = (template: unknown, modelRef: string): RoutingConfig => {
+  const document = isRecord(template) ? template : invalid("Pi Fabric role routing template must contain a roles object");
+  const roleEntries = isRecord(document.roles) ? document.roles : invalid("Pi Fabric role routing template must contain a roles object");
+  const roles: Record<string, unknown> = {};
+  for (const [name, rawRoute] of Object.entries(roleEntries)) {
+    const route = isRecord(rawRoute) ? rawRoute : invalid(`Invalid role entry in template: ${name}`);
+    roles[name] = { ...route, model: modelRef };
+  }
+  return validateRoutingConfig({ ...document, roles });
+};
+
+let bundledExamplePathOverride: string | undefined;
+
+/** Override the bundled example path (tests/advanced recovery). */
+export const setBundledExamplePath = (path: string | undefined): void => {
+  bundledExamplePathOverride = path;
+};
+
+/**
+ * Resolve the bundled example routing template shipped with the package.
+ * Computed relative to this module so it works both when Pi loads src/index.ts
+ * (examples is ../examples) and when running the built dist/index.js (examples
+ * is still ../examples). Derived from the module URL rather than CWD or argv
+ * to avoid import.meta path fragility.
+ */
+export const getBundledExamplePath = (): string => {
+  if (bundledExamplePathOverride) return bundledExamplePathOverride;
+  const here = fileURLToPath(import.meta.url);
+  return join(dirname(here), "..", "examples", CONFIG_FILE);
+};
+
+export type BootstrapOutcome =
+  | { created: true; path: string }
+  | { created: false; reason: "exists"; path: string }
+  | { created: false; reason: "template"; error: string }
+  | { created: false; reason: "write"; error: string };
+
+/**
+ * First-run routing config installation. Reads and seeds the bundled template
+ * with the current model ref, then race-safely exclusive-creates the target
+ * file with mode 0600. Never overwrites or merges an existing file; another
+ * process winning the race is reported as "exists", not an error. Template and
+ * filesystem errors never leave a partial or broken config behind.
+ */
+export const bootstrapRoutingConfig = (options: {
+  modelRef: string;
+  templatePath?: string;
+  templateContent?: string;
+  targetPath?: string;
+}): BootstrapOutcome => {
+  const target = options.targetPath ?? getRoutingConfigPath();
+  // Fast path: avoid reading and validating the template when the config
+  // already exists. Race safety comes from the exclusive open below.
+  if (existsSync(target)) return { created: false, reason: "exists", path: target };
+
+  const templatePath = options.templatePath ?? getBundledExamplePath();
+  let templateText: string;
+  try {
+    templateText =
+      options.templateContent !== undefined ? options.templateContent : readFileSync(templatePath, "utf8");
+  } catch (error) {
+    return { created: false, reason: "template", error: `Cannot read bundled routing template ${templatePath}: ${reasonOf(error)}` };
+  }
+
+  let parsedTemplate: unknown;
+  try {
+    parsedTemplate = JSON.parse(templateText);
+  } catch (error) {
+    return { created: false, reason: "template", error: `Bundled routing template is not valid JSON (${templatePath}): ${reasonOf(error)}` };
+  }
+
+  let config: RoutingConfig;
+  try {
+    config = seedTemplateModels(parsedTemplate, options.modelRef);
+  } catch (error) {
+    return { created: false, reason: "template", error: `Bundled routing template is invalid: ${reasonOf(error)}` };
+  }
+
+  const directory = dirname(target);
+  try {
+    mkdirSync(directory, { recursive: true });
+  } catch (error) {
+    return { created: false, reason: "write", error: `Cannot create routing config directory ${directory}: ${reasonOf(error)}` };
+  }
+
+  const content = `${JSON.stringify(config, null, 2)}\n`;
+  let fd: number | undefined;
+  try {
+    // O_CREAT | O_EXCL: fails with EEXIST if another process created the file
+    // between the existsSync check above and here. Mode 0600 has no group/other
+    // bits, so umask cannot relax it; fchmod re-asserts it on the open fd.
+    fd = openSync(target, "wx", 0o600);
+    fchmodSync(fd, 0o600);
+    writeFileSync(fd, content, "utf8");
+    fsyncSync(fd);
+    closeSync(fd);
+    fd = undefined;
+  } catch (error) {
+    if (fd !== undefined) {
+      // We created the file; a later step failed. Remove our partial file.
+      try { closeSync(fd); } catch { /* ignore close error during cleanup */ }
+      try { unlinkSync(target); } catch { /* another process may have removed it */ }
+      return { created: false, reason: "write", error: `Cannot create routing config ${target}: ${reasonOf(error)}` };
+    }
+    if (isExistsError(error)) return { created: false, reason: "exists", path: target };
+    return { created: false, reason: "write", error: `Cannot create routing config ${target}: ${reasonOf(error)}` };
+  }
+  return { created: true, path: target };
+};
+
+export type EnsureOutcome =
+  | { created: true; path: string; modelRef: string }
+  | { created: false; reason: "exists"; path: string }
+  | { created: false; reason: "no-model" }
+  | { created: false; reason: "template"; error: string }
+  | { created: false; reason: "write"; error: string };
+
+/**
+ * Bootstrap the routing config from the host's current model. Returns a
+ * structured outcome so session_start can notify exactly once on creation and
+ * stay quiet when the config already exists. Refuses to write when no current
+ * model is available so a broken config is never created.
+ */
+export const ensureRoutingConfig = (
+  context: Pick<ExtensionContext, "model">,
+  options?: { templatePath?: string; templateContent?: string; targetPath?: string },
+): EnsureOutcome => {
+  const model = context.model;
+  if (!model || typeof model.provider !== "string" || typeof model.id !== "string") {
+    return { created: false, reason: "no-model" };
+  }
+  const modelRef = formatModelRef(model.provider, model.id);
+  const outcome = bootstrapRoutingConfig({ modelRef, ...options });
+  if (outcome.created) return { created: true, path: outcome.path, modelRef };
+  if (outcome.reason === "exists") return { created: false, reason: "exists", path: outcome.path };
+  return { created: false, reason: outcome.reason, error: outcome.error };
 };
 
 const dispatchableRoutes = (config: RoutingConfig) =>
@@ -821,9 +979,32 @@ export default function piFabricRoleRouter(pi: ExtensionAPI): void {
   pi.on("session_start", async (_event, context) => {
     if (process.env.PI_FABRIC_PARENT_RUN) return;
     try {
-      await applyPrimaryRole(pi, context);
+      const outcome = ensureRoutingConfig(context);
+      if (outcome.created) {
+        context.ui.notify(
+          `Created Pi Fabric role routing at ${outcome.path} using the current model (${outcome.modelRef}). Edit roles with /fabric-role.`,
+          "info",
+        );
+      } else if (outcome.reason === "no-model") {
+        context.ui.notify(
+          `Pi Fabric role routing could not be generated automatically: no current model is available. Select a model and start a new Pi session to retry, or create ${getRoutingConfigPath()} manually.`,
+          "warning",
+        );
+      } else if (outcome.reason === "template" || outcome.reason === "write") {
+        context.ui.notify(outcome.error, "warning");
+      }
+      // "exists" stays quiet so reload/resume/new sessions are not noisy.
     } catch (error) {
       context.ui.notify(error instanceof Error ? error.message : String(error), "warning");
+    }
+    // Apply the primary role only when a config is present; the warning above
+    // already explains a missing config and applyPrimaryRole would only repeat it.
+    if (existsSync(getRoutingConfigPath())) {
+      try {
+        await applyPrimaryRole(pi, context);
+      } catch (error) {
+        context.ui.notify(error instanceof Error ? error.message : String(error), "warning");
+      }
     }
   });
 
