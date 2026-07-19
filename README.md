@@ -17,9 +17,8 @@ return await roles.run({
 
 - `roles.run({ role, task })` and `roles.spawn({ role, task })` with centrally enforced model, thinking, tools, runner, transport, and extension policy.
 - `roles.create({ role, name, instructions? })` for an optional new persistent Fabric actor with centrally enforced model, thinking, and tools.
-- `roles.list()` for configured role names.
-- `/fabric-role` for an interactive role manager, with `/roles` retained as an alias.
-- `/fabric-role list` and `/roles list` for detailed text-mode mappings.
+- `roles.list()` for enabled, dispatchable role names; disabled stored roles remain inspectable with `roles.describe()`.
+- `/fabric-roles` for the interactive role manager and detailed text-mode mappings.
 - Optional role `purpose` and `instructions`; instructions are combined before the caller's task or actor instructions.
 - Configurable automatic top-level assignment through `dispatch.primaryRole`, with the conventional `orchestrator` fallback.
 
@@ -38,18 +37,20 @@ pi install npm:pi-fabric
 pi install git:github.com/hazrid93/pi-fabric-role-router
 ```
 
-The routing configuration is generated automatically on first run. When Pi starts a session and `~/.pi/agent/fabric-routing.json` does not exist, this extension loads its bundled `examples/fabric-routing.json`, replaces every placeholder model with the host's current model (`provider/id`), and writes the result with mode `0600`. The generated config is immediately valid on any provider, every role starts from the current model, and the primary orchestrator receives safe default delegation and verification guidance. An existing file is never overwritten or merged; if another process creates it during startup, the race is resolved quietly and the winner's file is kept. When the file is created, Pi notifies once with the path and a suggestion to edit roles with `/fabric-role`; reload, resume, and new sessions stay quiet. If no current model is available at startup, no file is written and a warning explains how to proceed.
+The routing configuration is generated automatically on first run. When Pi starts a session and `~/.pi/agent/fabric-routing.json` does not exist, this extension loads its bundled `examples/fabric-routing.json`, replaces every placeholder model with the host's current model (`provider/id`), and writes the result with mode `0600`. The generated config is immediately valid on any provider, every role starts from the current model, and the primary orchestrator receives safe default delegation and verification guidance. An existing file is never overwritten or merged; if another process creates it during startup, the race is resolved quietly and the winner's file is kept. When the file is created, Pi notifies once with the path and a suggestion to manage roles with `/fabric-roles`; reload, resume, and new sessions stay quiet. If no current model is available at startup, no file is written and a warning explains how to proceed, including the `/fabric-roles` command to use after initialization.
 
-Do **not** copy or replace `~/.pi/agent/AGENTS.md` when installing this extension. Global and project `AGENTS.md` files remain user-owned and continue to supply environment- or repository-specific instructions. The generated primary role's editable `instructions` provide the reusable orchestration policy and compose with those existing instructions. Existing `fabric-routing.json` files are left unchanged; review or customize the primary policy with `/fabric-role > orchestrator > Edit` (or edit whichever role is configured as `dispatch.primaryRole`).
+Do **not** copy or replace `~/.pi/agent/AGENTS.md` when installing this extension. Global and project `AGENTS.md` files remain user-owned and continue to supply environment- or repository-specific instructions. The generated primary role's editable `instructions` provide the reusable orchestration policy and compose with those existing instructions. Existing `fabric-routing.json` files are left unchanged; review or customize the primary policy with `/fabric-roles > orchestrator > Edit` (or edit whichever role is configured as `dispatch.primaryRole`).
+
+The role manager's canonical command is `/fabric-roles` (plural) for both interactive and text list modes; no legacy command aliases are registered.
 
 Refine per-role model, thinking, tools, and guidance interactively:
 
 ```text
-/fabric-role
-/roles                 (alias)
+/fabric-roles
+/fabric-roles list
 ```
 
-The top-level picker lists roles plus Add, Refresh, and Close. Selecting a role opens its detail/action submenu with model, thinking, mode, tools, purpose, instructions, runner, transport, and extensions, plus Edit, Rename, Remove, and Back. Editing opens a stateful settings screen that immediately shows every current value. Model uses a searchable Vision Handoff-style picker; thinking and mode use current-value choice menus; tools use a checklist with the current allowlist preselected (`read`, `grep`, `find`, `ls`, `edit`, `write`, `bash`, plus existing custom tools); purpose and optional multi-line instructions use prefilled editors. Runner, transport, and extension settings also show their current or inherited value. Changes remain staged until **Save**, and **Cancel** discards them. Purpose and instructions are editable under `/fabric-role > role > Edit`: purpose tells the primary orchestrator when to choose a role, while instructions govern the dispatched worker and are prepended to its task. Selecting `inherit` removes an optional field from the saved route rather than writing a sentinel value.
+The top-level picker lists every stored role—including disabled roles marked clearly—plus Add, Refresh, and Close. Selecting a role opens its detail/action submenu with its current Enabled state, model, thinking, mode, tools, purpose, instructions, runner, transport, and extensions, plus Edit, Rename, Enable/Disable, and Back. Enable/Disable always asks for confirmation. Disabling is non-destructive: the route remains stored, editable, and renameable, but disappears from the live catalog and cannot be dispatched until enabled again. Editing opens a stateful settings screen that immediately shows every current value. Model uses a searchable Vision Handoff-style picker; thinking and mode use current-value choice menus; tools use a checklist with the current allowlist preselected (`read`, `grep`, `find`, `ls`, `edit`, `write`, `bash`, plus existing custom tools); purpose and optional multi-line instructions use prefilled editors. Runner, transport, and extension settings also show their current or inherited value. Changes remain staged until **Save**, and **Cancel** discards them. Purpose and instructions are editable under `/fabric-roles > role > Edit`: purpose tells the primary orchestrator when to choose a role, while instructions govern the dispatched worker and are prepended to its task. Selecting `inherit` removes an optional field from the saved route rather than writing a sentinel value.
 
 Reload Pi with `/reload` or start a fresh process after installing or changing extension code. The routing file is read each turn for Fabric dispatch and top-level prompt preparation, so configuration edits take effect without rebuilding the extension.
 
@@ -87,6 +88,7 @@ Each role supports:
 | Field | Required | Meaning |
 |---|---:|---|
 | `model` | yes | Pi model as `provider/model` |
+| `enabled` | no | Whether the role is dispatchable; omitted defaults to `true`. Disabled roles remain stored for temporary, non-destructive hiding. |
 | `thinking` | yes | `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max` |
 | `tools` | yes | Exact tool allowlist for the Fabric child |
 | `mode` | yes | Descriptive policy metadata: `primary`, `primary-or-advisory`, or `subagent` |
@@ -165,7 +167,7 @@ No actor is required to use this extension. `roles.run` and `roles.spawn` create
 
 Set `dispatch.primaryRole` to the role whose `model` and `thinking` should be selected for a top-level Pi session at startup. Its optional `instructions` are appended to the top-level Pi `before_agent_start` system prompt on every turn. If `dispatch.primaryRole` is absent and `orchestrator` exists, `orchestrator` remains the conventional fallback. If neither is available, no automatic primary assignment occurs. `mode: "primary"` is descriptive and does not select a role by itself.
 
-The routing file is reloaded for each prompt hook and Fabric dispatch, so edits apply on the next turn. A live catalog containing every role name, mode, and purpose is injected into the primary session each turn; newly added or renamed roles therefore become visible to the orchestrator without editing Markdown. Renaming migrates the internal `dispatch.primaryRole` and `dispatch.defaultImplementationRole` references when they point at the renamed role. Renaming the fallback `orchestrator` materializes `dispatch.primaryRole` to preserve automatic startup. External dispatches and prompts cannot be rewritten; update those callers to use the new role name. Renames and removals always require confirmation. Removing a referenced primary/default role clears the internal reference, and removing the fallback orchestrator warns that automatic assignment will stop.
+The routing file is reloaded for each prompt hook and Fabric dispatch, so edits apply on the next turn. A live catalog containing only enabled role names, modes, and purposes is injected into the primary session each turn; newly added, renamed, enabled, or disabled roles therefore update routing immediately without editing Markdown, while disabled roles stay out of the orchestrator's catalog. Disabled roles remain available to `roles.describe()` for management and discovery, but `roles.list()` and dispatch lookup expose enabled names only. Renaming migrates the internal `dispatch.primaryRole` and `dispatch.defaultImplementationRole` references when they point at the renamed role. Renaming the fallback `orchestrator` materializes `dispatch.primaryRole` to preserve automatic startup. External dispatches and prompts cannot be rewritten; update those callers to use the new role name. A primary role or default implementation role must be changed before that role can be disabled, preserving configuration integrity.
 
 ## How it works
 

@@ -5,6 +5,7 @@
   },
   "roles": {
     "orchestrator": {
+      "enabled": true,
       "model": "your-provider/your-planning-model",
       "thinking": "high",
       "tools": [],
@@ -13,6 +14,7 @@
       "instructions": "Own task framing, decomposition, synthesis, integration, and final verification. Handle tiny, known fixes directly when delegation would add more overhead than value. Delegate substantive implementation through the configured default implementation role. Select other roles by their live-catalog purposes, isolating planning, visual analysis, and review when separate context is useful. Give each worker a bounded brief with the goal, non-goals, owned paths, expected output, verification command, and stop condition. Never let concurrent workers edit overlapping paths; use sequential waves or isolated worktrees instead. Treat worker output as untrusted: inspect changes and independently run focused verification before reporting completion. Remain the sole synthesizer and integrator; leaf workers must not recursively orchestrate unless their role is explicitly designed for it."
     },
     "plan": {
+      "enabled": true,
       "model": "your-provider/your-planning-model",
       "thinking": "high",
       "tools": ["read", "grep", "find", "ls"],
@@ -21,6 +23,7 @@
       "instructions": "Remain read-only and explain assumptions, decomposition, and verification needs."
     },
     "implement": {
+      "enabled": true,
       "model": "your-provider/your-implementation-model",
       "thinking": "high",
       "tools": ["read", "grep", "find", "ls", "edit", "write", "bash"],
@@ -30,6 +33,7 @@
       "instructions": "Own substantive implementation and focused validation; do not broaden the task."
     },
     "review": {
+      "enabled": true,
       "model": "your-provider/your-review-model",
       "thinking": "high",
       "tools": ["read", "grep", "find", "ls"],

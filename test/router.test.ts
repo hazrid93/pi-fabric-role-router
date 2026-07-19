@@ -15,6 +15,7 @@ import router, {
   formatRoleDetail,
   getBundledExamplePath,
   getRoleSettingValues,
+  isRoleEnabled,
   loadRoutingConfig,
   migrateRoleReferences,
   missingConfigMessage,
@@ -22,6 +23,7 @@ import router, {
   saveRoutingConfig,
   seedTemplateModels,
   setBundledExamplePath,
+  toggleRoleEnabled,
   validateRoutingConfig,
 } from "../src/index.js";
 
@@ -65,7 +67,7 @@ describe("Pi Fabric role router", () => {
     };
     router(pi as never);
 
-    expect(commands).toEqual(["fabric-role", "roles"]);
+    expect(commands).toEqual(["fabric-roles"]);
     expect([...hooks.keys()]).toEqual(expect.arrayContaining(["session_start", "tool_call", "before_agent_start"]));
 
     const event = {
@@ -142,6 +144,116 @@ describe("Pi Fabric role router", () => {
     expect(resolvePrimaryRoleName({ roles: { plan: route } })).toBeUndefined();
   });
 
+  it("treats omitted enabled as true and keeps disabled roles visible only to management", () => {
+    const config = validateRoutingConfig({
+      roles: {
+        legacy: {
+          model: "example/legacy",
+          thinking: "medium",
+          tools: [],
+          mode: "subagent",
+        },
+        hidden: {
+          model: "example/hidden",
+          thinking: "low",
+          tools: ["read"],
+          mode: "subagent",
+          enabled: false,
+        },
+      },
+    });
+    expect(isRoleEnabled(config.roles.legacy)).toBe(true);
+    expect(isRoleEnabled(config.roles.hidden)).toBe(false);
+    expect(formatRoleDetails(config)).toContain("enabled: no");
+    expect(formatRoleDetail("hidden", config.roles.hidden)).toContain("enabled: no");
+    expect(formatRoleCatalog(config)).toContain("- legacy");
+    expect(formatRoleCatalog(config)).not.toContain("- hidden");
+  });
+
+  it("lists enabled roles, describes disabled roles, and rejects disabled dispatches", () => {
+    const config = validateRoutingConfig({
+      roles: {
+        enabled: {
+          model: "example/enabled",
+          thinking: "medium",
+          tools: ["read"],
+          mode: "subagent",
+          instructions: "Enabled guidance.",
+        },
+        hidden: {
+          model: "example/hidden",
+          thinking: "low",
+          tools: [],
+          mode: "subagent",
+          enabled: false,
+          purpose: "Temporarily hidden.",
+          instructions: "Hidden guidance.",
+        },
+      },
+    });
+    const agents = {
+      run: (request: unknown) => request,
+      spawn: (request: unknown) => request,
+      create: (request: unknown) => request,
+    };
+    expect(executePrelude(config, "return roles.list();", agents)).toEqual(["enabled"]);
+    expect(executePrelude(config, `return roles.describe("hidden");`, agents)).toMatchObject({
+      name: "hidden",
+      enabled: false,
+      purpose: "Temporarily hidden.",
+    });
+    for (const expression of [
+      `roles.run({ role: "hidden", task: "work" })`,
+      `roles.spawn({ role: "hidden", task: "work" })`,
+      `roles.create({ role: "hidden", name: "hidden-actor", instructions: "watch" })`,
+    ]) {
+      expect(() => executePrelude(config, `return ${expression};`, agents)).toThrow("disabled. Enable it via /fabric-roles");
+    }
+  });
+
+  it("toggles enabled state purely and rejects primary/default references", () => {
+    const route = {
+      model: "example/model",
+      thinking: "medium" as const,
+      tools: ["read"],
+      mode: "subagent" as const,
+      purpose: "Keep this value.",
+      futureRouteField: { keep: true },
+    };
+    const config = validateRoutingConfig({
+      dispatch: { primaryRole: "primary", defaultImplementationRole: "build" },
+      roles: {
+        primary: { ...route, mode: "primary" as const },
+        build: { ...route },
+        hidden: { ...route },
+      },
+    });
+    const disabled = toggleRoleEnabled(config, "hidden", false);
+    expect(disabled.roles.hidden).toEqual({ ...route, enabled: false });
+    expect(config.roles.hidden).toEqual(route);
+    expect(toggleRoleEnabled(disabled, "hidden").roles.hidden.enabled).toBe(true);
+    expect(() => toggleRoleEnabled(config, "primary", false)).toThrow("change dispatch.primaryRole first");
+    expect(() => toggleRoleEnabled(config, "build", false)).toThrow("change dispatch.defaultImplementationRole first");
+
+    const fallback = validateRoutingConfig({ roles: { orchestrator: { ...route, mode: "primary" as const } } });
+    expect(() => toggleRoleEnabled(fallback, "orchestrator", false)).toThrow(/primary role/);
+  });
+
+  it("rejects disabled dispatch references during config validation", () => {
+    expect(() => validateRoutingConfig({
+      dispatch: { primaryRole: "hidden" },
+      roles: {
+        hidden: {
+          model: "example/hidden",
+          thinking: "low",
+          tools: [],
+          mode: "subagent",
+          enabled: false,
+        },
+      },
+    })).toThrow("dispatch.primaryRole must reference an enabled role");
+  });
+
   it("migrates only router-owned rename references and preserves unknown dispatch fields", () => {
     const route = {
       model: "example/model",
@@ -177,6 +289,29 @@ describe("Pi Fabric role router", () => {
     const migration = migrateRoleReferences(validateRoutingConfig({ roles: { orchestrator: route, review: route } }), "orchestrator", "lead");
     expect(migration.materializedPrimary).toBe(true);
     expect(migration.config.dispatch?.primaryRole).toBe("lead");
+  });
+
+  it("renames a disabled conventional role without materializing a disabled primary reference", () => {
+    const migration = migrateRoleReferences(validateRoutingConfig({
+      roles: {
+        orchestrator: {
+          model: "example/orchestrator",
+          thinking: "medium",
+          tools: [],
+          mode: "primary",
+          enabled: false,
+        },
+        review: {
+          model: "example/review",
+          thinking: "low",
+          tools: ["read"],
+          mode: "subagent",
+        },
+      },
+    }), "orchestrator", "lead");
+    expect(migration.materializedPrimary).toBe(false);
+    expect(migration.config.dispatch).toBeUndefined();
+    expect(migration.config.roles.lead.enabled).toBe(false);
   });
 
   it("filters model picker items across provider, id, name, and capabilities without vision-only filtering", async () => {
@@ -434,7 +569,7 @@ describe("Pi Fabric role router", () => {
       expect(notifications).toHaveLength(1);
       expect(notifications[0].type).toBe("info");
       expect(notifications[0].message).toContain(target);
-      expect(notifications[0].message).toContain("/fabric-role");
+      expect(notifications[0].message).toContain("/fabric-roles");
 
       await sessionStart({}, context);
       expect(notifications).toHaveLength(1);
@@ -471,6 +606,7 @@ describe("Pi Fabric role router", () => {
       expect(notifications).toHaveLength(1);
       expect(notifications[0].type).toBe("warning");
       expect(notifications[0].message).toContain("no current model");
+      expect(notifications[0].message).toContain("/fabric-roles");
       rmSync(dir, { recursive: true, force: true });
     });
 
@@ -482,6 +618,7 @@ describe("Pi Fabric role router", () => {
       const message = missingConfigMessage(file);
       expect(message).toContain(file);
       expect(message).toContain("Start a new Pi session");
+      expect(message).toContain("/fabric-roles");
       expect(() => loadRoutingConfig()).toThrow(message);
       rmSync(dir, { recursive: true, force: true });
     });

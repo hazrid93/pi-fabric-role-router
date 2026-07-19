@@ -71,6 +71,8 @@ export type RoleRoute = {
   thinking: ThinkingLevel;
   tools: string[];
   mode: RoleMode;
+  /** Omitted for legacy configs; omitted and true both mean dispatchable. */
+  enabled?: boolean;
   purpose?: string;
   instructions?: string;
   runner?: RoleRunner;
@@ -101,6 +103,9 @@ export const getRoutingConfigPath = (): string =>
 const invalid = (message: string): never => {
   throw new Error(message);
 };
+
+/** Legacy routes without an enabled field remain dispatchable. */
+export const isRoleEnabled = (route: Pick<RoleRoute, "enabled">): boolean => route.enabled !== false;
 
 /** Validate without normalizing away unknown document or route fields. */
 export const validateRoutingConfig = (value: unknown): RoutingConfig => {
@@ -137,6 +142,9 @@ export const validateRoutingConfig = (value: unknown): RoutingConfig => {
     if (typeof route.mode !== "string" || !MODES.has(route.mode)) {
       invalid(`Role ${name} has an invalid mode`);
     }
+    if (route.enabled !== undefined && typeof route.enabled !== "boolean") {
+      invalid(`Role ${name} has an invalid enabled value`);
+    }
     if (route.purpose !== undefined && typeof route.purpose !== "string") {
       invalid(`Role ${name} has an invalid purpose`);
     }
@@ -155,17 +163,56 @@ export const validateRoutingConfig = (value: unknown): RoutingConfig => {
     roles[name] = route as RoleRoute;
   }
   if (Object.keys(roles).length === 0) invalid("Pi Fabric role routing defines no roles");
+  for (const field of ["primaryRole", "defaultImplementationRole"] as const) {
+    const referencedName = isRecord(document.dispatch) ? document.dispatch[field] : undefined;
+    const referencedRoute = typeof referencedName === "string" ? roles[referencedName] : undefined;
+    if (referencedRoute && !isRoleEnabled(referencedRoute)) {
+      invalid(`Pi Fabric role routing dispatch.${field} must reference an enabled role: ${referencedName}`);
+    }
+  }
 
   // Spread the original object rather than rebuilding it: unknown top-level keys
   // and unknown route fields are intentionally part of the persisted contract.
   return { ...document, roles } as RoutingConfig;
 };
 
-/** Resolve the role that owns automatic top-level model and prompt behavior. */
+/** Resolve the enabled role that owns automatic top-level model and prompt behavior. */
 export const resolvePrimaryRoleName = (config: RoutingConfig): string | undefined => {
   const configured = config.dispatch?.primaryRole;
-  if (configured !== undefined) return config.roles[configured] ? configured : undefined;
-  return config.roles.orchestrator ? "orchestrator" : undefined;
+  if (configured !== undefined) {
+    return config.roles[configured] && isRoleEnabled(config.roles[configured]) ? configured : undefined;
+  }
+  return config.roles.orchestrator && isRoleEnabled(config.roles.orchestrator) ? "orchestrator" : undefined;
+};
+
+/**
+ * Purely enable or disable a stored role. Disabling a referenced role is
+ * rejected so routing references never silently point at a hidden route.
+ * Passing no desired state toggles the role.
+ */
+export const toggleRoleEnabled = (
+  config: RoutingConfig,
+  name: string,
+  desiredEnabled?: boolean,
+): RoutingConfig => {
+  const route = config.roles[name];
+  if (!route) invalid(`Unknown Pi Fabric role: ${name}`);
+  const enabled = desiredEnabled ?? !isRoleEnabled(route);
+  if (!enabled) {
+    if (config.dispatch?.primaryRole === name || resolvePrimaryRoleName(config) === name) {
+      invalid(`Cannot disable primary role ${name}; change dispatch.primaryRole first.`);
+    }
+    if (config.dispatch?.defaultImplementationRole === name) {
+      invalid(`Cannot disable default implementation role ${name}; change dispatch.defaultImplementationRole first.`);
+    }
+  }
+  return validateRoutingConfig({
+    ...config,
+    roles: {
+      ...config.roles,
+      [name]: { ...route, enabled },
+    },
+  });
 };
 
 export type RoleReferenceMigration = {
@@ -187,7 +234,7 @@ export const migrateRoleReferences = (
   if (nextDispatch.primaryRole === oldName) {
     nextDispatch.primaryRole = newName;
     migrated.push("dispatch.primaryRole");
-  } else if (oldName === "orchestrator" && nextDispatch.primaryRole === undefined) {
+  } else if (oldName === "orchestrator" && nextDispatch.primaryRole === undefined && isRoleEnabled(config.roles[oldName])) {
     nextDispatch.primaryRole = newName;
     materializedPrimary = true;
   }
@@ -202,22 +249,9 @@ export const migrateRoleReferences = (
   return { config: nextConfig, migrated, materializedPrimary };
 };
 
-export const removeRoleReferences = (config: RoutingConfig, name: string): string[] => {
-  const references: string[] = [];
-  if (config.dispatch?.primaryRole === name) references.push("dispatch.primaryRole");
-  if (config.dispatch?.defaultImplementationRole === name) references.push("dispatch.defaultImplementationRole");
-  if (references.length > 0 && config.dispatch) {
-    const dispatch = { ...config.dispatch };
-    if (dispatch.primaryRole === name) delete dispatch.primaryRole;
-    if (dispatch.defaultImplementationRole === name) delete dispatch.defaultImplementationRole;
-    config.dispatch = dispatch;
-  }
-  return references;
-};
-
 /** Actionable guidance shown when the routing file is missing. */
 export const missingConfigMessage = (file: string): string =>
-  `Pi Fabric role routing is not configured: ${file} is missing. Start a new Pi session to generate it automatically from the current model, or create it manually (see the package README).`;
+  `Pi Fabric role routing is not configured: ${file} is missing. Start a new Pi session to generate it automatically from the current model, then manage roles with /fabric-roles, or create it manually (see the package README).`;
 
 export const loadRoutingConfig = (): RoutingConfig => {
   const file = getRoutingConfigPath();
@@ -375,7 +409,7 @@ export const bootstrapRoutingConfig = (options: {
     fd = undefined;
   } catch (error) {
     if (fd !== undefined) {
-      // We created the file; a later step failed. Remove our partial file.
+      // We created the file; a later step failed. Clean up our partial file.
       try { closeSync(fd); } catch { /* ignore close error during cleanup */ }
       try { unlinkSync(target); } catch { /* another process may have removed it */ }
       return { created: false, reason: "write", error: `Cannot create routing config ${target}: ${reasonOf(error)}` };
@@ -416,18 +450,20 @@ export const ensureRoutingConfig = (
 
 const dispatchableRoutes = (config: RoutingConfig) =>
   Object.fromEntries(
-    Object.entries(config.roles).map(([name, route]) => [
-      name,
-      {
-        model: route.model,
-        thinking: route.thinking,
-        tools: route.tools,
-        ...(route.instructions !== undefined ? { instructions: route.instructions } : {}),
-        ...(route.runner ? { runner: route.runner } : {}),
-        ...(route.transport ? { transport: route.transport } : {}),
-        ...(route.extensions !== undefined ? { extensions: route.extensions } : {}),
-      },
-    ]),
+    Object.entries(config.roles)
+      .filter(([, route]) => isRoleEnabled(route))
+      .map(([name, route]) => [
+        name,
+        {
+          model: route.model,
+          thinking: route.thinking,
+          tools: route.tools,
+          ...(route.instructions !== undefined ? { instructions: route.instructions } : {}),
+          ...(route.runner ? { runner: route.runner } : {}),
+          ...(route.transport ? { transport: route.transport } : {}),
+          ...(route.extensions !== undefined ? { extensions: route.extensions } : {}),
+        },
+      ]),
   );
 
 /** Whitelist role metadata exposed by roles.describe; unknown route fields stay private. */
@@ -437,6 +473,7 @@ const describableRoutes = (config: RoutingConfig) =>
       name,
       {
         name,
+        enabled: isRoleEnabled(route),
         model: route.model,
         thinking: route.thinking,
         tools: route.tools,
@@ -465,8 +502,9 @@ export const buildRolePrelude = (config: RoutingConfig): string => {
   const descriptions = JSON.stringify(describableRoutes(config));
   return `const __fabricRoleRoutes = ${routes} as const;
 const __fabricRoleDescriptions = ${descriptions} as const;
-type FabricRole = keyof typeof __fabricRoleRoutes;
-type FabricRoleDescription = { name: string; model: string; thinking: string; tools: readonly string[]; mode: string; purpose?: string; instructions?: string; runner?: string; transport?: string; extensions?: boolean };
+type FabricRole = keyof typeof __fabricRoleDescriptions;
+type FabricRoleRoute = { model: string; thinking: string; tools: readonly string[]; instructions?: string; runner?: string; transport?: string; extensions?: boolean };
+type FabricRoleDescription = { name: string; enabled: boolean; model: string; thinking: string; tools: readonly string[]; mode: string; purpose?: string; instructions?: string; runner?: string; transport?: string; extensions?: boolean };
 type FabricRoleRequest = { role: FabricRole; task: string; name?: string; timeoutMs?: number; recursive?: boolean; worktree?: boolean; schema?: Record<string, unknown> };
 type FabricRoleCreateRequest = { role: FabricRole; name: string; instructions?: string; events?: Array<"input" | "turn_end" | "agent_settled" | "tool_error" | "session_compact">; topics?: string[]; delivery?: "mailbox" | "steer" | "followUp" | "nextTurn"; responseMode?: "text" | "directive"; triggerTurn?: boolean; coalesce?: boolean; timeoutMs?: number };
 const __combineFabricRoleInstructions = (instructions: string | undefined, task: string) => {
@@ -488,15 +526,29 @@ const __combineFabricActorInstructions = (instructions: string | undefined, acto
 };
 const __resolveFabricRole = (request: FabricRoleRequest) => {
   const { role, task, ...agentRequest } = request;
-  const route = __fabricRoleRoutes[role];
-  if (!route) throw new Error(\`Unknown Pi Fabric role: \${String(role)}\`);
+  const description = __fabricRoleDescriptions[role];
+  if (!description) throw new Error(\`Unknown Pi Fabric role: \${String(role)}\`);
+  const route = __fabricRoleRoutes[role as keyof typeof __fabricRoleRoutes] as FabricRoleRoute | undefined;
+  if (!route) {
+    if (description.enabled === false) {
+      throw new Error(\`Pi Fabric role \${String(role)} is disabled. Enable it via /fabric-roles before dispatching.\`);
+    }
+    throw new Error(\`Unknown Pi Fabric role: \${String(role)}\`);
+  }
   const { instructions, ...centralRoute } = route;
   return { ...agentRequest, task: __combineFabricRoleInstructions(instructions, task), ...centralRoute };
 };
 const __resolveFabricActor = (request: FabricRoleCreateRequest) => {
   const { role, instructions, ...actorRequest } = request;
-  const route = __fabricRoleRoutes[role];
-  if (!route) throw new Error(\`Unknown Pi Fabric role: \${String(role)}\`);
+  const description = __fabricRoleDescriptions[role];
+  if (!description) throw new Error(\`Unknown Pi Fabric role: \${String(role)}\`);
+  const route = __fabricRoleRoutes[role as keyof typeof __fabricRoleRoutes] as FabricRoleRoute | undefined;
+  if (!route) {
+    if (description.enabled === false) {
+      throw new Error(\`Pi Fabric role \${String(role)} is disabled. Enable it via /fabric-roles before dispatching.\`);
+    }
+    throw new Error(\`Unknown Pi Fabric role: \${String(role)}\`);
+  }
   return {
     ...actorRequest,
     instructions: __combineFabricActorInstructions(route.instructions, instructions, role),
@@ -511,7 +563,7 @@ const roles = {
   run: (request: FabricRoleRequest) => agents.run(__resolveFabricRole(request)),
   spawn: (request: FabricRoleRequest) => agents.spawn(__resolveFabricRole(request)),
   create: (request: FabricRoleCreateRequest) => agents.create(__resolveFabricActor(request)),
-  list: () => Object.keys(__fabricRoleRoutes) as FabricRole[],
+  list: () => Object.keys(__fabricRoleRoutes) as Array<keyof typeof __fabricRoleRoutes>,
   describe: (role: FabricRole): FabricRoleDescription => {
     const description = __fabricRoleDescriptions[role];
     if (!description) throw new Error(\`Unknown Pi Fabric role: \${String(role)}\`);
@@ -526,6 +578,7 @@ export const applyPrimaryRole = async (pi: ExtensionAPI, context: ExtensionConte
   const primaryName = resolvePrimaryRoleName(config);
   if (!primaryName) return;
   const route = config.roles[primaryName];
+  if (!route || !isRoleEnabled(route)) return;
   const separator = route.model.indexOf("/");
   const provider = route.model.slice(0, separator);
   const id = route.model.slice(separator + 1);
@@ -541,7 +594,7 @@ export const applyPrimaryRole = async (pi: ExtensionAPI, context: ExtensionConte
 const toolsSummary = (tools: string[]): string => tools.length > 0 ? tools.join(", ") : "(none)";
 
 export const formatRoleLabel = (name: string, route: RoleRoute): string =>
-  `${name} — ${route.model} · thinking: ${route.thinking} · mode: ${route.mode} · tools: ${toolsSummary(route.tools)}`;
+  `${name} [${isRoleEnabled(route) ? "enabled" : "disabled"}] — ${route.model} · thinking: ${route.thinking} · mode: ${route.mode} · tools: ${toolsSummary(route.tools)}`;
 
 export const formatRoleDetails = (config: RoutingConfig): string =>
   Object.entries(config.roles).map(([name, route]) => {
@@ -552,20 +605,22 @@ export const formatRoleDetails = (config: RoutingConfig): string =>
     ].filter(Boolean).join(" ");
     const purpose = route.purpose ? `\n  purpose: ${route.purpose}` : "";
     const instructions = route.instructions ? `\n  instructions: ${route.instructions}` : "";
-    return `${name}\n  model: ${route.model}\n  thinking: ${route.thinking}\n  mode: ${route.mode}\n  tools: ${toolsSummary(route.tools)}${optional ? `\n  ${optional}` : ""}${purpose}${instructions}`;
+    return `${name}\n  enabled: ${isRoleEnabled(route) ? "yes" : "no"}\n  model: ${route.model}\n  thinking: ${route.thinking}\n  mode: ${route.mode}\n  tools: ${toolsSummary(route.tools)}${optional ? `\n  ${optional}` : ""}${purpose}${instructions}`;
   }).join("\n\n");
 
 export const formatRoleCatalog = (config: RoutingConfig): string => {
   const primary = resolvePrimaryRoleName(config);
   const implementation = config.dispatch?.defaultImplementationRole;
-  const lines = Object.entries(config.roles).map(([name, route]) => {
-    const markers = [
-      name === primary ? "primary" : undefined,
-      name === implementation ? "default implementation" : undefined,
-    ].filter(Boolean);
-    const purpose = route.purpose?.trim() || `Configured ${route.mode} role.`;
-    return `- ${name} [${route.mode}]${markers.length ? ` (${markers.join(", ")})` : ""}: ${purpose}`;
-  });
+  const lines = Object.entries(config.roles)
+    .filter(([, route]) => isRoleEnabled(route))
+    .map(([name, route]) => {
+      const markers = [
+        name === primary ? "primary" : undefined,
+        name === implementation ? "default implementation" : undefined,
+      ].filter(Boolean);
+      const purpose = route.purpose?.trim() || `Configured ${route.mode} role.`;
+      return `- ${name} [${route.mode}]${markers.length ? ` (${markers.join(", ")})` : ""}: ${purpose}`;
+    });
   return `Available Pi Fabric roles (live routing catalog):\n${lines.join("\n")}\nChoose roles by purpose and dispatch with roles.run({ role, task }).`;
 };
 
@@ -575,7 +630,7 @@ export const formatRoleDetail = (name: string, route: RoleRoute): string => {
     route.transport ? `transport: ${route.transport}` : undefined,
     route.extensions !== undefined ? `extensions: ${route.extensions}` : undefined,
   ].filter(Boolean).join("\n  ");
-  return `${name}\n  model: ${route.model}\n  thinking: ${route.thinking}\n  mode: ${route.mode}\n  tools: ${toolsSummary(route.tools)}${optional ? `\n  ${optional}` : ""}\n  purpose: ${route.purpose?.trim() || "(none)"}\n  instructions: ${route.instructions?.trim() || "(none)"}`;
+  return `${name}\n  enabled: ${isRoleEnabled(route) ? "yes" : "no"}\n  model: ${route.model}\n  thinking: ${route.thinking}\n  mode: ${route.mode}\n  tools: ${toolsSummary(route.tools)}${optional ? `\n  ${optional}` : ""}\n  purpose: ${route.purpose?.trim() || "(none)"}\n  instructions: ${route.instructions?.trim() || "(none)"}`;
 };
 
 const notifyError = (context: ExtensionContext, error: unknown): void => {
@@ -841,6 +896,7 @@ const addRole = async (context: ExtensionCommandContext, config: RoutingConfig):
     thinking: "medium",
     tools: [],
     mode: "subagent",
+    enabled: true,
   });
   if (!route) return false;
   config.roles[name] = route;
@@ -860,7 +916,7 @@ export const renameRole = async (context: ExtensionCommandContext, config: Routi
     config.dispatch?.primaryRole === oldName ? "dispatch.primaryRole" : undefined,
     config.dispatch?.defaultImplementationRole === oldName ? "dispatch.defaultImplementationRole" : undefined,
   ].filter((value): value is string => value !== undefined);
-  const fallbackMaterialization = oldName === "orchestrator" && config.dispatch?.primaryRole === undefined;
+  const fallbackMaterialization = oldName === "orchestrator" && config.dispatch?.primaryRole === undefined && isRoleEnabled(config.roles[oldName]);
   const confirmed = await context.ui.confirm(
     `Rename ${oldName} to ${newName}?`,
     `${references.length > 0 ? `This migrates ${references.join(" and ")}. ` : ""}${fallbackMaterialization ? "This will set dispatch.primaryRole so automatic startup continues. " : ""}External dispatches and prompts using ${oldName} cannot be rewritten; they must use ${newName}. Continue?`,
@@ -872,28 +928,24 @@ export const renameRole = async (context: ExtensionCommandContext, config: Routi
   return newName;
 };
 
-const removeRole = async (context: ExtensionCommandContext, config: RoutingConfig, name: string): Promise<boolean> => {
-  if (Object.keys(config.roles).length <= 1) {
-    context.ui.notify("Cannot remove the last role; the routing file must contain at least one role.", "warning");
-    return false;
-  }
-  const references = [
-    config.dispatch?.primaryRole === name ? "dispatch.primaryRole" : undefined,
-    config.dispatch?.defaultImplementationRole === name ? "dispatch.defaultImplementationRole" : undefined,
-  ].filter((value): value is string => value !== undefined);
-  const fallbackWarning = name === "orchestrator" && config.dispatch?.primaryRole === undefined
-    ? " Automatic primary assignment will stop."
-    : "";
+const toggleRole = async (context: ExtensionCommandContext, config: RoutingConfig, name: string): Promise<boolean> => {
+  const route = config.roles[name];
+  const enabled = !isRoleEnabled(route);
+  const action = enabled ? "Enable" : "Disable";
   const confirmed = await context.ui.confirm(
-    `Remove role ${name}?`,
-    `This permanently removes the ${name} route from ${getRoutingConfigPath()}.${references.length > 0 ? ` It will clear ${references.join(" and ")}.` : ""}${fallbackWarning} Continue?`,
+    `${action} role ${name}?`,
+    enabled
+      ? `${name} will return to the live catalog and become dispatchable. Continue?`
+      : `${name} will remain stored and editable but will be hidden from the live catalog and cannot be dispatched. Continue?`,
   );
   if (!confirmed) return false;
-  const nextConfig = { ...config, roles: { ...config.roles } };
-  delete nextConfig.roles[name];
-  removeRoleReferences(nextConfig, name);
-  saveRoutingConfig(nextConfig);
-  context.ui.notify(`Removed role ${name}.`, "info");
+  try {
+    saveRoutingConfig(toggleRoleEnabled(config, name, enabled));
+  } catch (error) {
+    notifyError(context, error);
+    return false;
+  }
+  context.ui.notify(`${enabled ? "Enabled" : "Disabled"} role ${name}.`, "info");
   return true;
 };
 
@@ -903,10 +955,11 @@ const manageRoleActions = async (
   name: string,
 ): Promise<{ config: RoutingConfig; name?: string }> => {
   const route = config.roles[name];
+  const toggleAction = isRoleEnabled(route) ? "Disable" : "Enable";
   const action = await context.ui.select(formatRoleDetail(name, route), [
     "Edit",
     "Rename",
-    "Remove",
+    toggleAction,
     "Back",
   ]);
   if (action === undefined || action === "Back") return { config, name };
@@ -924,10 +977,9 @@ const manageRoleActions = async (
     const renamed = await renameRole(context, config, name);
     return renamed ? { config: loadRoutingConfig(), name: renamed } : { config, name };
   }
-  if (action === "Remove") {
-    if (await removeRole(context, config, name)) {
-      const nextConfig = loadRoutingConfig();
-      return { config: nextConfig, name: Object.keys(nextConfig.roles)[0] };
+  if (action === toggleAction) {
+    if (await toggleRole(context, config, name)) {
+      return { config: loadRoutingConfig(), name };
     }
   }
   return { config, name };
@@ -982,16 +1034,16 @@ export default function piFabricRoleRouter(pi: ExtensionAPI): void {
       const outcome = ensureRoutingConfig(context);
       if (outcome.created) {
         context.ui.notify(
-          `Created Pi Fabric role routing at ${outcome.path} using the current model (${outcome.modelRef}). Edit roles with /fabric-role.`,
+          `Created Pi Fabric role routing at ${outcome.path} using the current model (${outcome.modelRef}). Manage roles with /fabric-roles.`,
           "info",
         );
       } else if (outcome.reason === "no-model") {
         context.ui.notify(
-          `Pi Fabric role routing could not be generated automatically: no current model is available. Select a model and start a new Pi session to retry, or create ${getRoutingConfigPath()} manually.`,
+          `Pi Fabric role routing could not be generated automatically: no current model is available. Select a model and start a new Pi session to retry, then manage roles with /fabric-roles, or create ${getRoutingConfigPath()} manually.`,
           "warning",
         );
       } else if (outcome.reason === "template" || outcome.reason === "write") {
-        context.ui.notify(outcome.error, "warning");
+        context.ui.notify(`${outcome.error} Once the routing file is available, manage roles with /fabric-roles.`, "warning");
       }
       // "exists" stays quiet so reload/resume/new sessions are not noisy.
     } catch (error) {
@@ -1026,12 +1078,8 @@ export default function piFabricRoleRouter(pi: ExtensionAPI): void {
     return { systemPrompt: `${event.systemPrompt}\n\n${additions.join("\n\n")}` };
   });
 
-  pi.registerCommand("fabric-role", {
+  pi.registerCommand("fabric-roles", {
     description: "Manage centrally configured Pi Fabric roles",
-    handler: handleRoleCommand,
-  });
-  pi.registerCommand("roles", {
-    description: "Manage centrally configured Pi Fabric roles (alias)",
     handler: handleRoleCommand,
   });
 }
