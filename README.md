@@ -43,7 +43,7 @@ pi install npm:pi-fabric-role-router
 To pin a specific release, include its version:
 
 ```bash
-pi install npm:pi-fabric-role-router@0.4.0
+pi install npm:pi-fabric-role-router@0.4.1
 ```
 
 Manage the installed npm package with Pi:
