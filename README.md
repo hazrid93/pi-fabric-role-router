@@ -1,5 +1,8 @@
 # pi-fabric-role-router
 
+[![npm version](https://img.shields.io/npm/v/pi-fabric-role-router.svg)](https://www.npmjs.com/package/pi-fabric-role-router)
+[![npm downloads](https://img.shields.io/npm/dm/pi-fabric-role-router.svg)](https://www.npmjs.com/package/pi-fabric-role-router)
+
 A community-maintained Pi extension for centralized, role-based routing in [Pi Fabric](https://github.com/monotykamary/pi-fabric).
 
 Define model, thinking, tools, and role guidance once in `~/.pi/agent/fabric-routing.json`, then dispatch by role:
@@ -30,10 +33,29 @@ return await roles.run({
 
 ## Install
 
-Install Pi Fabric first, then this extension from GitHub:
+The package is published on npm as [`pi-fabric-role-router`](https://www.npmjs.com/package/pi-fabric-role-router). Install Pi Fabric first, then install this extension through Pi's package manager:
 
 ```bash
 pi install npm:pi-fabric
+pi install npm:pi-fabric-role-router
+```
+
+To pin a specific release, include its version:
+
+```bash
+pi install npm:pi-fabric-role-router@0.4.0
+```
+
+Manage the installed npm package with Pi:
+
+```bash
+pi update npm:pi-fabric-role-router
+pi remove npm:pi-fabric-role-router
+```
+
+Alternatively, install the current GitHub source directly:
+
+```bash
 pi install git:github.com/hazrid93/pi-fabric-role-router
 ```
 
@@ -59,13 +81,15 @@ Reload Pi with `/reload` or start a fresh process after installing or changing e
 
 If automatic generation is unavailable (for example, no model is selected at startup), create the file by hand from the shipped example and edit the placeholder models:
 
+For an npm installation:
+
 ```bash
-cp ~/.pi/agent/git/github.com/hazrid93/pi-fabric-role-router/examples/fabric-routing.json \
+cp ~/.pi/agent/npm/pi-fabric-role-router/examples/fabric-routing.json \
   ~/.pi/agent/fabric-routing.json
 $EDITOR ~/.pi/agent/fabric-routing.json
 ```
 
-Depending on Pi's package checkout layout/version, locate the example with:
+For an installation from GitHub source, the example is under `~/.pi/agent/git/github.com/hazrid93/pi-fabric-role-router/examples/`. Depending on Pi's package checkout layout/version, locate either copy with:
 
 ```bash
 find ~/.pi/agent -path '*pi-fabric-role-router/examples/fabric-routing.json'
