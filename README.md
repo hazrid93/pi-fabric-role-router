@@ -235,8 +235,6 @@ The compatibility test type-checks the generated role wrappers against the guest
 ## Related projects
 
 - [monotykamary/pi-fabric](https://github.com/monotykamary/pi-fabric) — the programmable tool and agent runtime this extension integrates with
-- [badlogic/pi-mono](https://github.com/badlogic/pi-coding-agent) — upstream Pi coding agent project
-- [ryan-brosas/fabric-pi-template](https://github.com/ryan-brosas/fabric-pi-template) — role-oriented Pi Fabric configuration inspiration
 
 ## License
 
