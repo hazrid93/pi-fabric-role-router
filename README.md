@@ -3,9 +3,9 @@
 [![npm version](https://img.shields.io/npm/v/pi-fabric-role-router.svg)](https://www.npmjs.com/package/pi-fabric-role-router)
 [![npm downloads](https://img.shields.io/npm/dm/pi-fabric-role-router.svg)](https://www.npmjs.com/package/pi-fabric-role-router)
 
-A community-maintained Pi extension for centralized, role-based routing in [Pi Fabric](https://github.com/monotykamary/pi-fabric).
+**OMP-style role routing, powered by [Pi Fabric](https://github.com/monotykamary/pi-fabric).**
 
-Define model, thinking, tools, and role guidance once in `~/.pi/agent/fabric-routing.json`, then dispatch by role:
+[Oh My Pi (OMP)](https://github.com/can1357/oh-my-pi) routes work by intent: a role such as `default`, `smol`, `slow`, or `plan` selects an appropriate model. This community extension brings that core behavior to Pi Fabric: define named roles once, dispatch work by role, and let Fabric execute the resulting one-shot agent, background worker, or persistent actor.
 
 ```ts
 return await roles.run({
@@ -14,12 +14,34 @@ return await roles.run({
 });
 ```
 
-> This project integrates with and requires Pi Fabric. It is not affiliated with or endorsed by the maintainers of Pi or Pi Fabric.
+## Why use it?
+
+Without this extension, every Fabric call must repeat—and allow the caller to choose—its model, thinking level, tools, runner, transport, extension access, and behavioral instructions. With the role router, all of that becomes a centrally enforced policy in `~/.pi/agent/fabric-routing.json`:
+
+```text
+role: research  → fast model, broad read/search tools
+role: implement → coding model, editing tools, worker transport
+role: review    → high reasoning, read-only tools, no extensions
+```
+
+The orchestrator only chooses the role and supplies the task. It cannot silently replace the role's configured model or expand its tool access.
+
+This provides OMP-like role ergonomics while retaining Fabric's execution system:
+
+- **Route by intent, not provider details** — call `roles.run({ role: "review", task })` instead of repeating agent settings.
+- **Use arbitrary role names and policies** — roles are not limited to OMP's built-in model-role names.
+- **Keep policy consistent** — model, thinking, tools, instructions, runner, transport, and extension access live in one editable configuration.
+- **Keep Fabric capabilities** — roles delegate to Fabric's `agents.run`, `agents.spawn`, and `agents.create`, including schemas, worktrees, actors, events, delivery, and transports.
+- **Control cost and safety** — route lightweight work to cheaper models and restrict sensitive roles to the minimum required tools.
+
+It is inspired by OMP's role-routing concept; it is not an OMP compatibility layer and does not require OMP.
+
+> This project integrates with and requires Pi Fabric. It is not affiliated with or endorsed by the maintainers of Pi, Pi Fabric, or Oh My Pi.
 
 ## What it provides
 
 - `roles.run({ role, task })` and `roles.spawn({ role, task })` with centrally enforced model, thinking, tools, runner, transport, and extension policy.
-- `roles.create({ role, name, instructions? })` for an optional new persistent Fabric actor with centrally enforced model, thinking, and tools.
+- `roles.create({ role, name, instructions? })` for an optional new persistent Fabric actor with the role's centrally enforced model, thinking, tools, runner, transport, and extension policy.
 - `roles.list()` for enabled, dispatchable role names; disabled stored roles remain inspectable with `roles.describe()`.
 - `/fabric-roles` for the interactive role manager and detailed text-mode mappings.
 - Optional role `purpose` and `instructions`; instructions are combined before the caller's task or actor instructions.
