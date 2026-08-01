@@ -119,7 +119,7 @@ Each role supports:
 | `purpose` | no | Editable display metadata shown by the manager and text listing; it does not affect runtime |
 | `instructions` | no | Editable runtime guidance prepended to a one-shot task or actor instructions |
 | `runner` | no | Optional Pi Fabric runner: `pi` or `claude`; omit to inherit the Fabric default |
-| `transport` | no | Optional child transport: `auto`, `process`, `tmux`, `screen`, or `localterm`; omit to inherit |
+| `transport` | no | Optional child transport: `auto`, `process`, `tmux`, `screen`, `localterm`, or `herdr`; omit to inherit |
 | `extensions` | no | Optional child extension policy: `true` to enable or `false` to disable; omit to inherit |
 
 The optional `dispatch` object controls router-owned internal references:
@@ -168,7 +168,7 @@ const actor = await roles.create({
 });
 ```
 
-For `run` and `spawn`, the configured role instructions are followed by a `Task:` separator and the supplied task. For `create`, configured role instructions are followed by the optional `Actor instructions:` supplied at the call site. Actor creation rejects the request before `agents.create` if both sources are missing or whitespace-only. Empty guidance is otherwise omitted. The wrapper resolves central fields after caller fields, so callers cannot override model, thinking, tools, runner, transport, or extensions for one-shot dispatches; actor creation centrally sets model, thinking, tools, runner, and transport (extensions are not an actor setting in Fabric's actor API).
+For `run` and `spawn`, the configured role instructions are followed by a `Task:` separator and the supplied task. For `create`, configured role instructions are followed by the optional `Actor instructions:` supplied at the call site. Actor creation rejects the request before `agents.create` if both sources are missing or whitespace-only. Empty guidance is otherwise omitted. The wrapper resolves central fields after caller fields, so callers cannot override model, thinking, tools, runner, transport, or extensions for one-shot dispatches or actor creation. Actor requests may also use Fabric's current host event names and `validWhile` predicate.
 
 Inspect names:
 
@@ -207,6 +207,8 @@ npm run check
 npm pack --dry-run
 pi -e ./src/index.ts
 ```
+
+The compatibility test type-checks the generated role wrappers against the guest declarations from the pinned development version of Pi Fabric. CI runs the complete check on Node.js 24.
 
 ## Related projects
 

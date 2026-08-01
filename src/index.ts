@@ -55,15 +55,15 @@ const THINKING_LEVELS: ReadonlySet<string> = new Set(THINKING_LEVEL_CHOICES);
 const MODE_CHOICES = ["primary", "primary-or-advisory", "subagent"] as const;
 const MODES: ReadonlySet<string> = new Set(MODE_CHOICES);
 const RUNNERS = new Set(["pi", "claude"]);
-const TRANSPORTS = new Set(["auto", "process", "tmux", "screen", "localterm"]);
+const TRANSPORTS = new Set(["auto", "process", "tmux", "screen", "localterm", "herdr"]);
 const RUNNER_CHOICES = ["inherit", "pi", "claude"] as const;
-const TRANSPORT_CHOICES = ["inherit", "auto", "process", "tmux", "screen", "localterm"] as const;
+const TRANSPORT_CHOICES = ["inherit", "auto", "process", "tmux", "screen", "localterm", "herdr"] as const;
 const EXTENSION_CHOICES = ["inherit", "enabled", "disabled"] as const;
 
 export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 export type RoleMode = "primary" | "primary-or-advisory" | "subagent";
 export type RoleRunner = "pi" | "claude";
-export type RoleTransport = "auto" | "process" | "tmux" | "screen" | "localterm";
+export type RoleTransport = "auto" | "process" | "tmux" | "screen" | "localterm" | "herdr";
 
 /** A route keeps an open shape so fields added by Fabric or users survive edits. */
 export type RoleRoute = {
@@ -505,8 +505,9 @@ const __fabricRoleDescriptions = ${descriptions} as const;
 type FabricRole = keyof typeof __fabricRoleDescriptions;
 type FabricRoleRoute = { model: string; thinking: string; tools: readonly string[]; instructions?: string; runner?: string; transport?: string; extensions?: boolean };
 type FabricRoleDescription = { name: string; enabled: boolean; model: string; thinking: string; tools: readonly string[]; mode: string; purpose?: string; instructions?: string; runner?: string; transport?: string; extensions?: boolean };
-type FabricRoleRequest = { role: FabricRole; task: string; name?: string; timeoutMs?: number; recursive?: boolean; worktree?: boolean; schema?: Record<string, unknown> };
-type FabricRoleCreateRequest = { role: FabricRole; name: string; instructions?: string; events?: Array<"input" | "turn_end" | "agent_settled" | "tool_error" | "session_compact">; topics?: string[]; delivery?: "mailbox" | "steer" | "followUp" | "nextTurn"; responseMode?: "text" | "directive"; triggerTurn?: boolean; coalesce?: boolean; timeoutMs?: number };
+type FabricRoleRequest = Omit<FabricAgentRequest, "task" | "model" | "thinking" | "tools" | "runner" | "transport" | "extensions"> & { role: FabricRole; task: string };
+type __FabricRoleActorRequest<T> = T extends unknown ? Omit<T, "name" | "instructions" | "model" | "thinking" | "tools" | "runner" | "transport" | "extensions"> : never;
+type FabricRoleCreateRequest = __FabricRoleActorRequest<FabricActorRequest> & { role: FabricRole; name: string; instructions?: string };
 const __combineFabricRoleInstructions = (instructions: string | undefined, task: string) => {
   const roleText = instructions?.trim();
   const taskText = task.trim();
@@ -557,6 +558,7 @@ const __resolveFabricActor = (request: FabricRoleCreateRequest) => {
     tools: route.tools,
     ...(route.runner ? { runner: route.runner } : {}),
     ...(route.transport ? { transport: route.transport } : {}),
+    ...(route.extensions !== undefined ? { extensions: route.extensions } : {}),
   };
 };
 const roles = {
