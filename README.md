@@ -221,6 +221,16 @@ Pi loads both extensions. When `fabric_exec` is called, this extension injects t
 
 Pi Fabric remains the agent runtime; this project supplies centralized role routing and role-management UI on top. Existing Fabric actors and global imports remain Fabric-managed.
 
+## Diagrams
+
+📐 Architecture diagrams — [docs/architecture.md](docs/architecture.md):
+
+- **High-Level Architecture** — how the extension, `fabric-routing.json`, and Pi Fabric's agent runtime fit together
+- **Dispatch Flow** — `roles.run()` from orchestrator call to Fabric child agent
+- **Startup Bootstrap** — first-run auto-generation of `fabric-routing.json`
+- **Per-Turn Primary Assignment** — how `dispatch.primaryRole` and the live role catalog are applied each turn
+- **Precedence** — why central policy always overrides dispatch-site fields
+
 ## Development
 
 ```bash
