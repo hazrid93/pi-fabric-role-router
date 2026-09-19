@@ -97,6 +97,15 @@ export type RoutingConfig = {
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
 
+/**
+ * Role names are validated against ROLE_NAME_PATTERN, which permits `constructor`
+ * — an inherited Object.prototype key. A bare `roles[name]` lookup therefore
+ * returns a truthy function for a role that does not exist, defeating every
+ * "unknown role" guard. All role lookups must be own-property checks.
+ */
+export const hasRole = (roles: object, name: string): boolean =>
+  Object.prototype.hasOwnProperty.call(roles, name);
+
 export const getRoutingConfigPath = (): string =>
   join(process.env.PI_CODING_AGENT_DIR ?? join(process.env.HOME ?? "", ".pi", "agent"), CONFIG_FILE);
 
@@ -165,7 +174,8 @@ export const validateRoutingConfig = (value: unknown): RoutingConfig => {
   if (Object.keys(roles).length === 0) invalid("Pi Fabric role routing defines no roles");
   for (const field of ["primaryRole", "defaultImplementationRole"] as const) {
     const referencedName = isRecord(document.dispatch) ? document.dispatch[field] : undefined;
-    const referencedRoute = typeof referencedName === "string" ? roles[referencedName] : undefined;
+    const referencedRoute =
+      typeof referencedName === "string" && hasRole(roles, referencedName) ? roles[referencedName] : undefined;
     if (referencedRoute && !isRoleEnabled(referencedRoute)) {
       invalid(`Pi Fabric role routing dispatch.${field} must reference an enabled role: ${referencedName}`);
     }
@@ -180,9 +190,11 @@ export const validateRoutingConfig = (value: unknown): RoutingConfig => {
 export const resolvePrimaryRoleName = (config: RoutingConfig): string | undefined => {
   const configured = config.dispatch?.primaryRole;
   if (configured !== undefined) {
-    return config.roles[configured] && isRoleEnabled(config.roles[configured]) ? configured : undefined;
+    return hasRole(config.roles, configured) && isRoleEnabled(config.roles[configured]) ? configured : undefined;
   }
-  return config.roles.orchestrator && isRoleEnabled(config.roles.orchestrator) ? "orchestrator" : undefined;
+  return hasRole(config.roles, "orchestrator") && isRoleEnabled(config.roles.orchestrator)
+    ? "orchestrator"
+    : undefined;
 };
 
 /**
@@ -195,8 +207,8 @@ export const toggleRoleEnabled = (
   name: string,
   desiredEnabled?: boolean,
 ): RoutingConfig => {
+  if (!hasRole(config.roles, name)) invalid(`Unknown Pi Fabric role: ${name}`);
   const route = config.roles[name];
-  if (!route) invalid(`Unknown Pi Fabric role: ${name}`);
   const enabled = desiredEnabled ?? !isRoleEnabled(route);
   if (!enabled) {
     if (config.dispatch?.primaryRole === name || resolvePrimaryRoleName(config) === name) {
@@ -508,6 +520,16 @@ type FabricRoleDescription = { name: string; enabled: boolean; model: string; th
 type FabricRoleRequest = Omit<FabricAgentRequest, "task" | "model" | "thinking" | "tools" | "runner" | "transport" | "extensions"> & { role: FabricRole; task: string };
 type __FabricRoleActorRequest<T> = T extends unknown ? Omit<T, "name" | "instructions" | "model" | "thinking" | "tools" | "runner" | "transport" | "extensions"> : never;
 type FabricRoleCreateRequest = __FabricRoleActorRequest<FabricActorRequest> & { role: FabricRole; name: string; instructions?: string };
+const __fabricRoleOwns = (map: object, role: string): boolean =>
+  Object.prototype.hasOwnProperty.call(map, role);
+/** Fields the central route owns. Stripped from caller input so a dispatch site
+ *  cannot supply one that the route happens to inherit rather than declare. */
+const __fabricCentralFields = ["model", "thinking", "tools", "runner", "transport", "extensions"];
+const __fabricStripCentral = (request: Record<string, unknown>): Record<string, unknown> => {
+  const copy: Record<string, unknown> = { ...request };
+  for (const key of __fabricCentralFields) delete copy[key];
+  return copy;
+};
 const __combineFabricRoleInstructions = (instructions: string | undefined, task: string) => {
   const roleText = instructions?.trim();
   const taskText = task.trim();
@@ -526,30 +548,36 @@ const __combineFabricActorInstructions = (instructions: string | undefined, acto
   return roleText + "\\n\\nActor instructions:\\n" + actorText;
 };
 const __resolveFabricRole = (request: FabricRoleRequest) => {
-  const { role, task, ...agentRequest } = request;
+  const { role, task, ...rest } = request;
+  const agentRequest = __fabricStripCentral(rest as Record<string, unknown>);
+  if (!__fabricRoleOwns(__fabricRoleDescriptions, String(role))) {
+    throw new Error(\`Unknown Pi Fabric role: \${String(role)}\`);
+  }
   const description = __fabricRoleDescriptions[role];
-  if (!description) throw new Error(\`Unknown Pi Fabric role: \${String(role)}\`);
-  const route = __fabricRoleRoutes[role as keyof typeof __fabricRoleRoutes] as FabricRoleRoute | undefined;
-  if (!route) {
+  if (!__fabricRoleOwns(__fabricRoleRoutes, String(role))) {
     if (description.enabled === false) {
       throw new Error(\`Pi Fabric role \${String(role)} is disabled. Enable it via /fabric-roles before dispatching.\`);
     }
     throw new Error(\`Unknown Pi Fabric role: \${String(role)}\`);
   }
+  const route = __fabricRoleRoutes[role as keyof typeof __fabricRoleRoutes] as FabricRoleRoute;
   const { instructions, ...centralRoute } = route;
   return { ...agentRequest, task: __combineFabricRoleInstructions(instructions, task), ...centralRoute };
 };
 const __resolveFabricActor = (request: FabricRoleCreateRequest) => {
-  const { role, instructions, ...actorRequest } = request;
+  const { role, instructions, ...rest } = request;
+  const actorRequest = __fabricStripCentral(rest as Record<string, unknown>);
+  if (!__fabricRoleOwns(__fabricRoleDescriptions, String(role))) {
+    throw new Error(\`Unknown Pi Fabric role: \${String(role)}\`);
+  }
   const description = __fabricRoleDescriptions[role];
-  if (!description) throw new Error(\`Unknown Pi Fabric role: \${String(role)}\`);
-  const route = __fabricRoleRoutes[role as keyof typeof __fabricRoleRoutes] as FabricRoleRoute | undefined;
-  if (!route) {
+  if (!__fabricRoleOwns(__fabricRoleRoutes, String(role))) {
     if (description.enabled === false) {
       throw new Error(\`Pi Fabric role \${String(role)} is disabled. Enable it via /fabric-roles before dispatching.\`);
     }
     throw new Error(\`Unknown Pi Fabric role: \${String(role)}\`);
   }
+  const route = __fabricRoleRoutes[role as keyof typeof __fabricRoleRoutes] as FabricRoleRoute;
   return {
     ...actorRequest,
     instructions: __combineFabricActorInstructions(route.instructions, instructions, role),
@@ -567,9 +595,10 @@ const roles = {
   create: (request: FabricRoleCreateRequest) => agents.create(__resolveFabricActor(request)),
   list: () => Object.keys(__fabricRoleRoutes) as Array<keyof typeof __fabricRoleRoutes>,
   describe: (role: FabricRole): FabricRoleDescription => {
-    const description = __fabricRoleDescriptions[role];
-    if (!description) throw new Error(\`Unknown Pi Fabric role: \${String(role)}\`);
-    return { ...description };
+    if (!__fabricRoleOwns(__fabricRoleDescriptions, String(role))) {
+      throw new Error(\`Unknown Pi Fabric role: \${String(role)}\`);
+    }
+    return { ...__fabricRoleDescriptions[role] };
   },
 };
 `;
@@ -889,7 +918,7 @@ export const editRole = async (
 const addRole = async (context: ExtensionCommandContext, config: RoutingConfig): Promise<boolean> => {
   const name = await context.ui.input("New role name", "role-name");
   if (name === undefined) return false;
-  if (!ROLE_NAME_PATTERN.test(name) || config.roles[name]) {
+  if (!ROLE_NAME_PATTERN.test(name) || hasRole(config.roles, name)) {
     context.ui.notify(`Role names must match ${ROLE_NAME_PATTERN.source} and be unique.`, "warning");
     return false;
   }
@@ -901,8 +930,17 @@ const addRole = async (context: ExtensionCommandContext, config: RoutingConfig):
     enabled: true,
   });
   if (!route) return false;
+  // Validate a candidate document BEFORE touching the live config: the editor
+  // offers Save with an empty model, and an invalid save used to propagate out of
+  // manageRoles and close the whole manager, leaving config mutated in memory.
+  const candidate = { ...config, roles: { ...config.roles, [name]: route } };
+  try {
+    saveRoutingConfig(candidate);
+  } catch (error) {
+    notifyError(context, error);
+    return false;
+  }
   config.roles[name] = route;
-  saveRoutingConfig(config);
   context.ui.notify(`Added role ${name}.`, "info");
   return true;
 };
@@ -910,7 +948,7 @@ const addRole = async (context: ExtensionCommandContext, config: RoutingConfig):
 export const renameRole = async (context: ExtensionCommandContext, config: RoutingConfig, oldName: string): Promise<string | undefined> => {
   const newName = await context.ui.input("Rename role", oldName);
   if (newName === undefined || newName === oldName) return undefined;
-  if (!ROLE_NAME_PATTERN.test(newName) || config.roles[newName]) {
+  if (!ROLE_NAME_PATTERN.test(newName) || hasRole(config.roles, newName)) {
     context.ui.notify(`Role names must match ${ROLE_NAME_PATTERN.source} and be unique.`, "warning");
     return undefined;
   }
@@ -968,8 +1006,13 @@ const manageRoleActions = async (
   if (action === "Edit") {
     const edited = await editRole(context, name, route);
     if (edited) {
-      config.roles[name] = edited;
-      saveRoutingConfig(config);
+      const candidate = { ...config, roles: { ...config.roles, [name]: edited } };
+      try {
+        saveRoutingConfig(candidate);
+      } catch (error) {
+        notifyError(context, error);
+        return { config, name };
+      }
       context.ui.notify(`Updated role ${name}.`, "info");
       config = loadRoutingConfig();
     }
@@ -1064,18 +1107,34 @@ export default function piFabricRoleRouter(pi: ExtensionAPI): void {
 
   pi.on("tool_call", (event) => {
     if (!isToolCallEventType("fabric_exec", event) || typeof event.input.code !== "string") return;
-    event.input.code = `${buildRolePrelude(loadRoutingConfig())}\n${event.input.code}`;
+    // A missing or hand-broken routing file must not fail every fabric_exec. Without
+    // this the whole turn dies, and the no-model startup path reaches here routinely.
+    let prelude: string;
+    try {
+      prelude = buildRolePrelude(loadRoutingConfig());
+    } catch {
+      return;
+    }
+    event.input.code = `${prelude}\n${event.input.code}`;
   });
 
   pi.on("before_agent_start", (event) => {
     const routingGuidance = "Pi Fabric role routing: dispatch child work inside fabric_exec with roles.run({ role, task, ... }) or roles.spawn({ role, task, ... }). Use roles.create({ role, name, instructions? }) only when a new persistent actor is intended. Do not pass model, thinking, tools, runner, transport, or extensions at dispatch sites; the central role resolver supplies and enforces them. Role instructions are combined with the supplied task by the wrapper.";
     const additions = [routingGuidance];
     if (!process.env.PI_FABRIC_PARENT_RUN) {
-      const config = loadRoutingConfig();
-      const primaryName = resolvePrimaryRoleName(config);
-      additions.push(formatRoleCatalog(config));
-      const instructions = primaryName ? config.roles[primaryName]?.instructions?.trim() : undefined;
-      if (instructions) additions.push(`Primary role (${primaryName}) instructions:\n${instructions}`);
+      // Degrade to the static guidance rather than throwing on every turn.
+      try {
+        const config = loadRoutingConfig();
+        const primaryName = resolvePrimaryRoleName(config);
+        additions.push(formatRoleCatalog(config));
+        const instructions =
+          primaryName && hasRole(config.roles, primaryName)
+            ? config.roles[primaryName]?.instructions?.trim()
+            : undefined;
+        if (instructions) additions.push(`Primary role (${primaryName}) instructions:\n${instructions}`);
+      } catch {
+        /* no catalog this turn */
+      }
     }
     return { systemPrompt: `${event.systemPrompt}\n\n${additions.join("\n\n")}` };
   });
