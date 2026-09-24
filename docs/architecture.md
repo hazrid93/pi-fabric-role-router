@@ -1,11 +1,11 @@
 # pi-fabric-role-router — Architecture
 
-> A Pi Fabric extension that adds OMP-style role routing: named roles defined once in `~/.pi/agent/fabric-routing.json`, dispatched with `roles.run()` / `roles.spawn()` / `roles.create()`, and enforced centrally so dispatch sites cannot override model, thinking, tools, runner, transport, or extensions.
+> A Pi Fabric extension that adds OMP-style role routing: named roles defined once in `~/.pi/agent/fabric-routing.json`, dispatched with `roles.run()` / `roles.spawn()` / `roles.create()`, and enforced centrally so dispatch sites cannot override model, thinking, tools, runner, transport, extensions, recursion, or session persistence.
 
 | | |
 |---|---|
 | **Language** | TypeScript · ES Modules |
-| **Runtime** | Node.js 24+ · in-process under Pi (requires Pi Fabric 0.21.10+) |
+| **Runtime** | Node.js 24+ · in-process under Pi (requires Pi Fabric 0.21.10+; `persistSession` requires the adjacent feature checkout) |
 | **Config** | `~/.pi/agent/fabric-routing.json` (auto-generated on first run, mode `0600`) |
 | **Entry points** | `fabric_exec` role wrappers · `/fabric-roles` manager · `before_agent_start` primary assignment |
 | **Delegation** | Pi Fabric `agents.run()` · `agents.spawn()` · `agents.create()` |
@@ -39,7 +39,7 @@ flowchart TB
   end
 
   subgraph Config["~/.pi/agent/fabric-routing.json"]
-    RJ["roles: model · enabled · thinking ·<br/>tools · mode · purpose · instructions ·<br/>runner · transport · extensions<br/>dispatch: primaryRole ·<br/>defaultImplementationRole"]
+    RJ["roles: model · enabled · thinking ·<br/>tools · mode · purpose · instructions ·<br/>runner · transport · extensions · persistSession<br/>dispatch: primaryRole ·<br/>defaultImplementationRole"]
   end
 
   IDX --> CFG
@@ -71,7 +71,7 @@ sequenceDiagram
   X->>R: inject typed roles into checked program
   R->>C: resolve role "implement"
   C->>C: read fabric-routing.json<br/>caller fields first, central fields last
-  C->>F: model · thinking · tools · runner ·<br/>transport · extensions enforced
+  C->>F: model · thinking · tools · runner ·<br/>transport · extensions · persistSession enforced<br/>recursive dispatch disabled
   R->>R: role instructions + "Task:" + task
   F-->>R: child agent result
   R-->>O: result
@@ -101,15 +101,16 @@ flowchart TB
 
 ```mermaid
 flowchart LR
-  A["before_agent_start"] --> B["re-read fabric-routing.json"]
+  A["session_start"] --> B["load fabric-routing.json"]
   B --> C["dispatch.primaryRole set?<br/>(fallback: existing 'orchestrator')"]
-  C -->|yes| D["apply primary role model + thinking<br/>to top-level session"]
-  D --> E["append primary instructions to<br/>system prompt"]
+  C -->|yes| D["apply primary role model + thinking<br/>for this session"]
   C -->|no| F["no automatic primary assignment"]
+  H["before_agent_start"] --> I["re-read fabric-routing.json"]
+  I --> E["append current primary instructions<br/>to system prompt"]
   E --> G["inject live role catalog:<br/>enabled names · modes · purposes"]
 ```
 
-The routing file is reloaded on every prompt hook and Fabric dispatch, so config edits take effect on the next turn without reloading the extension. Renaming a role migrates `dispatch.primaryRole` and `dispatch.defaultImplementationRole` references automatically.
+The routing file is reloaded on every prompt hook and Fabric dispatch, so instruction and catalog edits take effect on the next turn without reloading the extension. Primary model and thinking changes apply at the next session start. Renaming a role migrates `dispatch.primaryRole` and `dispatch.defaultImplementationRole` references automatically.
 
 ---
 
@@ -119,5 +120,5 @@ The routing file is reloaded on every prompt hook and Fabric dispatch, so config
 flowchart LR
   A["caller fields"] --> B["resolveFabricRole"]
   C["central role fields"] --> B
-  B --> D["central fields applied after caller fields —<br/>model, thinking, tools, runner,<br/>transport, extensions cannot be<br/>overridden at the dispatch site"]
+  B --> D["central fields applied after caller fields —<br/>model, thinking, tools, runner,<br/>transport, extensions, persistSession cannot be<br/>overridden; recursive dispatch is disabled"]
 ```

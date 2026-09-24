@@ -16,7 +16,7 @@ return await roles.run({
 
 ## Why use it?
 
-Without this extension, every Fabric call must repeat—and allow the caller to choose—its model, thinking level, tools, runner, transport, extension access, and behavioral instructions. With the role router, all of that becomes a centrally enforced policy in `~/.pi/agent/fabric-routing.json`:
+Without this extension, every Fabric call must repeat—and allow the caller to choose—its model, thinking level, tools, runner, transport, extension access, session persistence, and behavioral instructions. With the role router, all of that becomes a centrally enforced policy in `~/.pi/agent/fabric-routing.json`:
 
 ```text
 role: research  → fast model, broad read/search tools
@@ -24,13 +24,15 @@ role: implement → coding model, editing tools, worker transport
 role: review    → high reasoning, read-only tools, no extensions
 ```
 
-The orchestrator only chooses the role and supplies the task. It cannot silently replace the role's configured model or expand its tool access.
+The orchestrator only chooses the role and supplies the task. Through the `roles.*` API it cannot silently replace the role's configured model, expand its tool access, enable recursive Fabric, or override session persistence.
+
+This router is a policy API for trusted Fabric programs, not a sandbox around the native `agents.*` API. Code that deliberately calls `agents.*` directly is outside the router and can bypass role policy; untrusted guest code requires enforcement in Fabric itself.
 
 This provides OMP-like role ergonomics while retaining Fabric's execution system:
 
 - **Route by intent, not provider details** — call `roles.run({ role: "review", task })` instead of repeating agent settings.
 - **Use arbitrary role names and policies** — roles are not limited to OMP's built-in model-role names.
-- **Keep policy consistent** — model, thinking, tools, instructions, runner, transport, and extension access live in one editable configuration.
+- **Keep policy consistent** — model, thinking, tools, instructions, runner, transport, extension access, and session persistence live in one editable configuration.
 - **Keep Fabric capabilities** — roles delegate to Fabric's `agents.run`, `agents.spawn`, and `agents.create`, including schemas, worktrees, actors, events, delivery, and transports.
 - **Control cost and safety** — route lightweight work to cheaper models and restrict sensitive roles to the minimum required tools.
 
@@ -40,7 +42,7 @@ It is inspired by OMP's role-routing concept; it is not an OMP compatibility lay
 
 ## What it provides
 
-- `roles.run({ role, task })` and `roles.spawn({ role, task })` with centrally enforced model, thinking, tools, runner, transport, and extension policy.
+- `roles.run({ role, task })` and `roles.spawn({ role, task })` with centrally enforced model, thinking, tools, runner, transport, extension policy, and session persistence.
 - `roles.create({ role, name, instructions? })` for an optional new persistent Fabric actor with the role's centrally enforced model, thinking, tools, runner, transport, and extension policy.
 - `roles.list()` for enabled, dispatchable role names; disabled stored roles remain inspectable with `roles.describe()`.
 - `/fabric-roles` for the interactive role manager and detailed text-mode mappings.
@@ -52,6 +54,8 @@ It is inspired by OMP's role-routing concept; it is not an OMP compatibility lay
 - Node.js 24+
 - Pi 0.80.6+
 - [Pi Fabric](https://github.com/monotykamary/pi-fabric) 0.21.10+
+
+The optional `persistSession` route field additionally requires a Fabric build whose one-shot `agents.run`/`agents.spawn` schema exposes `persistSession`. The compatibility test intentionally uses the adjacent local Fabric checkout until that API is available in a published release. This retains the Claude Code transcript for observability and possible external resume; it does not automatically reuse context on a later `roles.run()` call. Use `roles.create()` when the router itself must provide multi-turn continuity.
 
 ## Install
 
@@ -65,7 +69,7 @@ pi install npm:pi-fabric-role-router
 To pin a specific release, include its version:
 
 ```bash
-pi install npm:pi-fabric-role-router@0.4.1
+pi install npm:pi-fabric-role-router@0.5.0
 ```
 
 Manage the installed npm package with Pi:
@@ -94,7 +98,7 @@ Refine per-role model, thinking, tools, and guidance interactively:
 /fabric-roles list
 ```
 
-The top-level picker lists every stored role—including disabled roles marked clearly—plus Add, Refresh, and Close. Selecting a role opens its detail/action submenu with its current Enabled state, model, thinking, mode, tools, purpose, instructions, runner, transport, and extensions, plus Edit, Rename, Enable/Disable, and Back. Enable/Disable always asks for confirmation. Disabling is non-destructive: the route remains stored, editable, and renameable, but disappears from the live catalog and cannot be dispatched until enabled again. Editing opens a stateful settings screen that immediately shows every current value. Model uses a searchable Vision Handoff-style picker; thinking and mode use current-value choice menus; tools use a checklist with the current allowlist preselected (`read`, `grep`, `find`, `ls`, `edit`, `write`, `bash`, plus existing custom tools); purpose and optional multi-line instructions use prefilled editors. Runner, transport, and extension settings also show their current or inherited value. Changes remain staged until **Save**, and **Cancel** discards them. Purpose and instructions are editable under `/fabric-roles > role > Edit`: purpose tells the primary orchestrator when to choose a role, while instructions govern the dispatched worker and are prepended to its task. Selecting `inherit` removes an optional field from the saved route rather than writing a sentinel value.
+The top-level picker lists every stored role—including disabled roles marked clearly—plus Add, Refresh, and Close. Selecting a role opens its detail/action submenu with its current Enabled state, model, thinking, mode, tools, purpose, instructions, runner, transport, and extensions, plus Edit, Rename, Enable/Disable, and Back. Enable/Disable always asks for confirmation. Disabling is non-destructive: the route remains stored, editable, and renameable, but disappears from the live catalog and cannot be dispatched until enabled again. Editing opens a stateful settings screen that immediately shows every current value. Model uses a searchable Vision Handoff-style picker; thinking and mode use current-value choice menus; tools use a checklist with the current allowlist preselected (`read`, `grep`, `find`, `ls`, `edit`, `write`, `bash`, plus existing custom tools); purpose and optional multi-line instructions use prefilled editors. Runner, transport, extension settings, and session persistence also show their current or inherited value. Changes remain staged until **Save**, and **Cancel** discards them. Purpose and instructions are editable under `/fabric-roles > role > Edit`: purpose tells the primary orchestrator when to choose a role, while instructions govern the dispatched worker and are prepended to its task. Selecting `inherit` removes an optional field from the saved route rather than writing a sentinel value.
 
 Reload Pi with `/reload` or start a fresh process after installing or changing extension code. The routing file is read each turn for Fabric dispatch and top-level prompt preparation, so configuration edits take effect without rebuilding the extension.
 
@@ -143,6 +147,7 @@ Each role supports:
 | `runner` | no | Optional Pi Fabric runner: `pi` or `claude`; omit to inherit the Fabric default |
 | `transport` | no | Optional child transport: `auto`, `process`, `tmux`, `screen`, `localterm`, or `herdr`; omit to inherit |
 | `extensions` | no | Optional child extension policy: `true` to enable or `false` to disable; omit to inherit |
+| `persistSession` | no | One-shot Claude runners only: retain the Claude transcript for observability and possible external resume; this does not automatically resume later role calls; omit to inherit |
 
 The optional `dispatch` object controls router-owned internal references:
 
@@ -190,7 +195,7 @@ const actor = await roles.create({
 });
 ```
 
-For `run` and `spawn`, the configured role instructions are followed by a `Task:` separator and the supplied task. For `create`, configured role instructions are followed by the optional `Actor instructions:` supplied at the call site. Actor creation rejects the request before `agents.create` if both sources are missing or whitespace-only. Empty guidance is otherwise omitted. The wrapper resolves central fields after caller fields, so callers cannot override model, thinking, tools, runner, transport, or extensions for one-shot dispatches or actor creation. Actor requests may also use Fabric's current host event names and `validWhile` predicate.
+For `run` and `spawn`, the configured role instructions are followed by a `Task:` separator and the supplied task. For `create`, configured role instructions are followed by the optional `Actor instructions:` supplied at the call site. Actor creation rejects the request before `agents.create` if both sources are missing or whitespace-only. Empty guidance is otherwise omitted. The wrapper resolves central fields after caller fields, so callers cannot override model, thinking, tools, runner, transport, extensions, recursion (always disabled), or `persistSession` for one-shot dispatches. Actor creation centrally enforces the shared role fields but intentionally omits `persistSession`, because actors already maintain persistent sessions. Actor requests may also use Fabric's current host event names and `validWhile` predicate.
 
 Inspect names:
 

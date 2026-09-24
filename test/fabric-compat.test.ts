@@ -1,4 +1,5 @@
-import { dirname, join } from "node:path";
+import { existsSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { ModuleKind, ScriptTarget, transpileModule } from "typescript";
 import { describe, expect, it } from "vitest";
@@ -12,6 +13,13 @@ type FabricTypeCheckResult = {
 type FabricGuestTypesModule = {
   GUEST_TYPE_DECLARATIONS: string;
 };
+
+type FabricAgentsModule = {
+  agentServiceDescriptors: () => Array<{ name: string; inputSchema: { properties?: Record<string, unknown> } }>;
+};
+
+const adjacentFabricDistDirectory = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "pi-fabric", "dist");
+const hasAdjacentFabricFeature = existsSync(join(adjacentFabricDistDirectory, "agents.js"));
 
 type FabricTypeCheckerModule = {
   typeCheckFabricCode: (code: string, declarations: string) => FabricTypeCheckResult;
@@ -71,6 +79,22 @@ return { spawned: await spawned, completed: await completed, actor: await actor,
 
     expect(result.errors).toEqual([]);
     expect(result.javascript).toBeTruthy();
+  });
+
+  it.skipIf(!hasAdjacentFabricFeature)("matches the adjacent Fabric persistence action schema", async () => {
+    const agentsUrl = pathToFileURL(join(adjacentFabricDistDirectory, "agents.js")).href;
+    const guestTypesUrl = pathToFileURL(join(adjacentFabricDistDirectory, "runtime", "guest-types.js")).href;
+    const [{ agentServiceDescriptors }, { GUEST_TYPE_DECLARATIONS }] = await Promise.all([
+      import(/* @vite-ignore */ agentsUrl) as Promise<FabricAgentsModule>,
+      import(/* @vite-ignore */ guestTypesUrl) as Promise<FabricGuestTypesModule>,
+    ]);
+    expect(GUEST_TYPE_DECLARATIONS).toContain("persistSession?: boolean");
+    const descriptors = agentServiceDescriptors();
+    const run = descriptors.find((descriptor) => descriptor.name === "run");
+    const spawn = descriptors.find((descriptor) => descriptor.name === "spawn");
+    expect(run?.inputSchema.properties).toHaveProperty("persistSession");
+    expect(run?.inputSchema.properties).toHaveProperty("recursive");
+    expect(spawn?.inputSchema.properties).toHaveProperty("persistSession");
   });
 
   it("forwards centrally enforced current transport and extension policy to actors", () => {

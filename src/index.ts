@@ -78,6 +78,8 @@ export type RoleRoute = {
   runner?: RoleRunner;
   transport?: RoleTransport;
   extensions?: boolean;
+  /** Session persistence for one-shot Claude runners; omitted means inherit Fabric default. */
+  persistSession?: boolean;
   [key: string]: unknown;
 };
 
@@ -159,6 +161,12 @@ export const validateRoutingConfig = (value: unknown): RoutingConfig => {
     }
     if (route.extensions !== undefined && typeof route.extensions !== "boolean") {
       invalid(`Role ${name} has an invalid extensions value`);
+    }
+    if (route.persistSession !== undefined && typeof route.persistSession !== "boolean") {
+      invalid(`Role ${name} has an invalid persistSession value`);
+    }
+    if (route.persistSession === true && route.runner !== "claude") {
+      invalid(`Role ${name} enables persistSession but does not explicitly use runner claude`);
     }
     roles[name] = route as RoleRoute;
   }
@@ -462,6 +470,7 @@ const dispatchableRoutes = (config: RoutingConfig) =>
           ...(route.runner ? { runner: route.runner } : {}),
           ...(route.transport ? { transport: route.transport } : {}),
           ...(route.extensions !== undefined ? { extensions: route.extensions } : {}),
+          ...(route.persistSession !== undefined ? { persistSession: route.persistSession } : {}),
         },
       ]),
   );
@@ -483,6 +492,7 @@ const describableRoutes = (config: RoutingConfig) =>
         ...(route.runner !== undefined ? { runner: route.runner } : {}),
         ...(route.transport !== undefined ? { transport: route.transport } : {}),
         ...(route.extensions !== undefined ? { extensions: route.extensions } : {}),
+        ...(route.persistSession !== undefined ? { persistSession: route.persistSession } : {}),
       },
     ]),
   );
@@ -503,10 +513,10 @@ export const buildRolePrelude = (config: RoutingConfig): string => {
   return `const __fabricRoleRoutes = ${routes} as const;
 const __fabricRoleDescriptions = ${descriptions} as const;
 type FabricRole = keyof typeof __fabricRoleDescriptions;
-type FabricRoleRoute = { model: string; thinking: string; tools: readonly string[]; instructions?: string; runner?: string; transport?: string; extensions?: boolean };
-type FabricRoleDescription = { name: string; enabled: boolean; model: string; thinking: string; tools: readonly string[]; mode: string; purpose?: string; instructions?: string; runner?: string; transport?: string; extensions?: boolean };
-type FabricRoleRequest = Omit<FabricAgentRequest, "task" | "model" | "thinking" | "tools" | "runner" | "transport" | "extensions"> & { role: FabricRole; task: string };
-type __FabricRoleActorRequest<T> = T extends unknown ? Omit<T, "name" | "instructions" | "model" | "thinking" | "tools" | "runner" | "transport" | "extensions"> : never;
+type FabricRoleRoute = { model: string; thinking: string; tools: readonly string[]; instructions?: string; runner?: string; transport?: string; extensions?: boolean; persistSession?: boolean };
+type FabricRoleDescription = { name: string; enabled: boolean; model: string; thinking: string; tools: readonly string[]; mode: string; purpose?: string; instructions?: string; runner?: string; transport?: string; extensions?: boolean; persistSession?: boolean };
+type FabricRoleRequest = Omit<FabricAgentRequest, "task" | "model" | "thinking" | "tools" | "runner" | "transport" | "extensions" | "recursive" | "persistSession"> & { role: FabricRole; task: string };
+type __FabricRoleActorRequest<T> = T extends unknown ? Omit<T, "name" | "instructions" | "model" | "thinking" | "tools" | "runner" | "transport" | "extensions" | "persistSession"> : never;
 type FabricRoleCreateRequest = __FabricRoleActorRequest<FabricActorRequest> & { role: FabricRole; name: string; instructions?: string };
 const __combineFabricRoleInstructions = (instructions: string | undefined, task: string) => {
   const roleText = instructions?.trim();
@@ -537,7 +547,7 @@ const __resolveFabricRole = (request: FabricRoleRequest) => {
     throw new Error(\`Unknown Pi Fabric role: \${String(role)}\`);
   }
   const { instructions, ...centralRoute } = route;
-  return { ...agentRequest, task: __combineFabricRoleInstructions(instructions, task), ...centralRoute };
+  return { ...agentRequest, task: __combineFabricRoleInstructions(instructions, task), ...centralRoute, recursive: false };
 };
 const __resolveFabricActor = (request: FabricRoleCreateRequest) => {
   const { role, instructions, ...actorRequest } = request;
@@ -604,6 +614,7 @@ export const formatRoleDetails = (config: RoutingConfig): string =>
       route.runner ? `runner=${route.runner}` : undefined,
       route.transport ? `transport=${route.transport}` : undefined,
       route.extensions !== undefined ? `extensions=${route.extensions}` : undefined,
+      route.persistSession !== undefined ? `persistSession=${route.persistSession}` : undefined,
     ].filter(Boolean).join(" ");
     const purpose = route.purpose ? `\n  purpose: ${route.purpose}` : "";
     const instructions = route.instructions ? `\n  instructions: ${route.instructions}` : "";
@@ -631,6 +642,7 @@ export const formatRoleDetail = (name: string, route: RoleRoute): string => {
     route.runner ? `runner: ${route.runner}` : undefined,
     route.transport ? `transport: ${route.transport}` : undefined,
     route.extensions !== undefined ? `extensions: ${route.extensions}` : undefined,
+    route.persistSession !== undefined ? `persistSession: ${route.persistSession}` : undefined,
   ].filter(Boolean).join("\n  ");
   return `${name}\n  enabled: ${isRoleEnabled(route) ? "yes" : "no"}\n  model: ${route.model}\n  thinking: ${route.thinking}\n  mode: ${route.mode}\n  tools: ${toolsSummary(route.tools)}${optional ? `\n  ${optional}` : ""}\n  purpose: ${route.purpose?.trim() || "(none)"}\n  instructions: ${route.instructions?.trim() || "(none)"}`;
 };
@@ -726,6 +738,7 @@ export type RoleSettingValues = {
   runner: string;
   transport: string;
   extensions: string;
+  persistSession: string;
 };
 
 /** Values displayed immediately by the stateful settings screen. */
@@ -739,6 +752,7 @@ export const getRoleSettingValues = (route: RoleRoute): RoleSettingValues => ({
   runner: optionalChoice(route.runner),
   transport: optionalChoice(route.transport),
   extensions: extensionChoice(route.extensions),
+  persistSession: extensionChoice(route.persistSession),
 });
 
 const cloneRoleDraft = (existing: RoleRoute): RoleRoute => ({
@@ -837,6 +851,12 @@ export const editRole = async (
         currentValue: extensionChoice(draft.extensions),
         submenu: (current, submenuDone) => new RoleChoicePicker("Extensions", EXTENSION_CHOICES, current, getSelectListTheme(), submenuDone),
       },
+      {
+        id: "persistSession",
+        label: "Persist Session",
+        currentValue: extensionChoice(draft.persistSession),
+        submenu: (current, submenuDone) => new RoleChoicePicker("Persist session", EXTENSION_CHOICES, current, getSelectListTheme(), submenuDone),
+      },
       { id: "save", label: "Save", currentValue: "Save changes", values: ["Save changes"] },
       { id: "cancel", label: "Cancel", currentValue: "Discard changes", values: ["Discard changes"] },
     ];
@@ -870,6 +890,9 @@ export const editRole = async (
         } else if (id === "extensions") {
           if (value === "inherit") delete draft.extensions;
           else draft.extensions = value === "enabled";
+        } else if (id === "persistSession") {
+          if (value === "inherit") delete draft.persistSession;
+          else draft.persistSession = value === "enabled";
         }
       },
       () => done(undefined),
@@ -1068,7 +1091,7 @@ export default function piFabricRoleRouter(pi: ExtensionAPI): void {
   });
 
   pi.on("before_agent_start", (event) => {
-    const routingGuidance = "Pi Fabric role routing: dispatch child work inside fabric_exec with roles.run({ role, task, ... }) or roles.spawn({ role, task, ... }). Use roles.create({ role, name, instructions? }) only when a new persistent actor is intended. Do not pass model, thinking, tools, runner, transport, or extensions at dispatch sites; the central role resolver supplies and enforces them. Role instructions are combined with the supplied task by the wrapper.";
+    const routingGuidance = "Pi Fabric role routing: dispatch child work inside fabric_exec with roles.run({ role, task, ... }) or roles.spawn({ role, task, ... }). Use roles.create({ role, name, instructions? }) only when a new persistent actor is intended. Do not pass model, thinking, tools, runner, transport, extensions, recursive, or persistSession at dispatch sites; the central role resolver supplies and enforces them. Role instructions are combined with the supplied task by the wrapper.";
     const additions = [routingGuidance];
     if (!process.env.PI_FABRIC_PARENT_RUN) {
       const config = loadRoutingConfig();
