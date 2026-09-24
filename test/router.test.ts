@@ -411,7 +411,7 @@ describe("Pi Fabric role router", () => {
   });
   it("shows all current role values and preserves tool selections", async () => {
     const route = { model: "example/current", thinking: "xhigh" as const, mode: "primary-or-advisory" as const, tools: ["read", "custom-tool"], purpose: "Analyze architecture.", instructions: "Stay read-only.", runner: "pi" as const, transport: "tmux" as const, extensions: false };
-    expect(getRoleSettingValues(route)).toEqual({ model: "example/current", thinking: "xhigh", mode: "primary-or-advisory", tools: "read, custom-tool", purpose: "Analyze architecture.", instructions: "Stay read-only.", runner: "pi", transport: "tmux", extensions: "disabled" });
+    expect(getRoleSettingValues(route)).toEqual({ model: "example/current", thinking: "xhigh", mode: "primary-or-advisory", tools: "read, custom-tool", purpose: "Analyze architecture.", instructions: "Stay read-only.", runner: "pi", transport: "tmux", extensions: "disabled", persistSession: "inherit" });
     const { buildToolCatalog, toggleToolSelection, moveToolSelection } = await import("../src/tool-selector.js");
     const catalog = buildToolCatalog(["custom-tool"]);
     expect(catalog).toContain("read");
